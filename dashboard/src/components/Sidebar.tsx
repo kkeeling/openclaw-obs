@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { NavLink } from "react-router-dom";
+import { prune } from "../hooks/useApi";
 
 interface SidebarProps {
   collapsed: boolean;
@@ -17,6 +19,42 @@ function SvgIcon({ d }: { d: string }) {
     <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
       <path strokeLinecap="round" strokeLinejoin="round" d={d} />
     </svg>
+  );
+}
+
+function PruneButton({ collapsed }: { collapsed: boolean }) {
+  const [pruning, setPruning] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+
+  async function handlePrune() {
+    if (pruning) return;
+    setPruning(true);
+    setResult(null);
+    try {
+      const res = await prune();
+      const sizeMb = (res.db_size_bytes / (1024 * 1024)).toFixed(1);
+      setResult(`${res.deleted} pruned (${sizeMb}MB)`);
+      setTimeout(() => setResult(null), 3000);
+    } catch {
+      setResult("Prune failed");
+      setTimeout(() => setResult(null), 3000);
+    } finally {
+      setPruning(false);
+    }
+  }
+
+  return (
+    <button
+      onClick={handlePrune}
+      disabled={pruning}
+      className="flex items-center gap-3 w-full px-2 py-1.5 rounded text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-100 disabled:opacity-50"
+      title={result || "Prune old traces"}
+    >
+      <svg className="w-5 h-5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+      </svg>
+      {!collapsed && <span>{pruning ? "Pruning..." : result || "Prune Data"}</span>}
+    </button>
   );
 }
 
@@ -69,7 +107,8 @@ export default function Sidebar({ collapsed, onToggle, darkMode, onToggleDark }:
       </nav>
 
       {/* Footer */}
-      <div className="border-t border-gray-200 dark:border-gray-800 p-2">
+      <div className="border-t border-gray-200 dark:border-gray-800 p-2 space-y-1">
+        <PruneButton collapsed={collapsed} />
         <button
           onClick={onToggleDark}
           className="flex items-center gap-3 w-full px-2 py-1.5 rounded text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors duration-100"

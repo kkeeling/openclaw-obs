@@ -47,9 +47,9 @@ export default function Overview() {
       <h1 className="text-lg font-semibold">Overview</h1>
 
       {/* Metric Cards */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <MetricCard
-          label="24h Cost"
+          label="7-Day Cost"
           value={stats ? formatCost(stats.total_cost) : "-"}
           subtext="Last 7 days"
           loading={loading}

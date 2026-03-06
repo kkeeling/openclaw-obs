@@ -275,7 +275,12 @@ export function listTraces(params: TraceListParams): TraceRow[] {
 
   return d
     .prepare(
-      `SELECT t.* FROM traces t ${where} ORDER BY t.started_at DESC LIMIT @limit OFFSET @offset`,
+      `SELECT t.*,
+        (SELECT GROUP_CONCAT(DISTINCT s.model) FROM spans s WHERE s.trace_id = t.id AND s.model IS NOT NULL) AS models,
+        (SELECT COALESCE(SUM(s.tokens_in), 0) FROM spans s WHERE s.trace_id = t.id) AS total_tokens_in,
+        (SELECT COALESCE(SUM(s.tokens_out), 0) FROM spans s WHERE s.trace_id = t.id) AS total_tokens_out,
+        (SELECT COALESCE(SUM(s.cost_usd), 0) FROM spans s WHERE s.trace_id = t.id) AS total_cost
+      FROM traces t ${where} ORDER BY t.started_at DESC LIMIT @limit OFFSET @offset`,
     )
     .all({ ...values, limit, offset }) as TraceRow[];
 }
@@ -464,12 +469,10 @@ export function pruneBySize(): number {
 
     const ids = oldest.map((r) => r.id);
     const placeholders = ids.map(() => "?").join(",");
-    d.prepare(`DELETE FROM spans WHERE trace_id IN (${placeholders})`).run(
-      ...ids,
-    );
+    d.prepare(`DELETE FROM spans WHERE trace_id IN (${placeholders})`).run(ids);
     const result = d
       .prepare(`DELETE FROM traces WHERE id IN (${placeholders})`)
-      .run(...ids);
+      .run(ids);
     totalDeleted += result.changes;
   }
 

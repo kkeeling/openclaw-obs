@@ -8,6 +8,11 @@ export interface TraceRow {
   ended_at: number | null;
   status: string;
   metadata: string | null;
+  // Span aggregates (from list API)
+  models: string | null;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  total_cost: number;
 }
 
 export interface SpanRow {

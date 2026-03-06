@@ -167,10 +167,11 @@ function registerHooks(api: PluginApi): void {
 
     const traceId = getOrCreateTrace(sessionId);
     const spanId = randomUUID();
-    // Use callId from event if available; otherwise generate a unique key
-    // This prevents collisions when the same tool is called in parallel
-    const callId = (event.callId as string) || (event.id as string) || spanId;
-    const mapKey = `${toolName}:${sessionId}:${callId}`;
+    // Use callId from event if available to prevent collisions on parallel calls.
+    // When no callId/id exists, fall back to old key format (toolName:sessionId)
+    // so that both before_ and after_tool_call resolve to the same key.
+    const callId = (event.callId as string) || (event.id as string) || "";
+    const mapKey = callId ? `${toolName}:${sessionId}:${callId}` : `${toolName}:${sessionId}`;
     toolSpanMap.set(mapKey, spanId);
 
     buffer.push({
@@ -201,8 +202,9 @@ function registerHooks(api: PluginApi): void {
     if (!sessionId) return;
 
     // Match using the same callId-based key from before_tool_call
+    // When no callId/id exists, fall back to old key format (toolName:sessionId)
     const callId = (event.callId as string) || (event.id as string) || "";
-    const mapKey = `${toolName}:${sessionId}:${callId}`;
+    const mapKey = callId ? `${toolName}:${sessionId}:${callId}` : `${toolName}:${sessionId}`;
     const spanId = toolSpanMap.get(mapKey);
     if (!spanId) return;
     toolSpanMap.delete(mapKey);

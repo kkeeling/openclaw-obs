@@ -48,10 +48,21 @@ function timeAgo(ms: number): string {
   return new Date(ms).toLocaleDateString();
 }
 
-// Extended trace row that includes span aggregates (computed client-side from the list)
-// The API just returns trace rows; we use the trace data as-is.
-// For the trace list, cost/tokens come from metadata or we show what we have.
-// Since the API doesn't include span aggregates in list view, we display trace-level data.
+function formatTokensCompact(tokIn: number, tokOut: number): string {
+  const fmt = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+    return String(n);
+  };
+  if (tokIn === 0 && tokOut === 0) return "-";
+  return `${fmt(tokIn)} / ${fmt(tokOut)}`;
+}
+
+function formatCostCompact(cost: number): string {
+  if (cost === 0) return "-";
+  if (cost < 0.01) return `$${cost.toFixed(4)}`;
+  return `$${cost.toFixed(2)}`;
+}
 
 const columns: ColumnDef<TraceRow>[] = [
   {
@@ -65,10 +76,10 @@ const columns: ColumnDef<TraceRow>[] = [
   {
     id: "session_id",
     header: "Session ID",
-    size: 180,
+    size: 150,
     accessorFn: (row) => row.session_id,
     cell: ({ row }) => (
-      <span className="font-mono text-xs truncate block max-w-[170px]" title={row.original.session_id}>
+      <span className="font-mono text-xs truncate block max-w-[140px]" title={row.original.session_id}>
         {row.original.session_id.slice(0, 12)}...
       </span>
     ),
@@ -76,16 +87,59 @@ const columns: ColumnDef<TraceRow>[] = [
   {
     id: "agent_name",
     header: "Agent",
-    size: 120,
+    size: 100,
     accessorFn: (row) => row.agent_name,
     cell: ({ row }) => (
-      <span className="truncate block max-w-[110px]">{row.original.agent_name}</span>
+      <span className="truncate block max-w-[90px]">{row.original.agent_name}</span>
     ),
+  },
+  {
+    id: "model",
+    header: "Model",
+    size: 140,
+    accessorFn: (row) => row.models || "",
+    cell: ({ row }) => {
+      const models = row.original.models;
+      if (!models) return <span className="text-xs text-gray-400">-</span>;
+      const list = models.split(",");
+      const display = list[0];
+      return (
+        <span className="font-mono text-xs truncate block max-w-[130px]" title={models}>
+          {display}{list.length > 1 ? ` +${list.length - 1}` : ""}
+        </span>
+      );
+    },
+  },
+  {
+    id: "tokens",
+    header: "Tokens (In / Out)",
+    size: 130,
+    accessorFn: (row) => (row.total_tokens_in || 0) + (row.total_tokens_out || 0),
+    cell: ({ row }) => (
+      <span className="font-mono text-xs">
+        {formatTokensCompact(row.original.total_tokens_in || 0, row.original.total_tokens_out || 0)}
+      </span>
+    ),
+  },
+  {
+    id: "cost",
+    header: "Cost",
+    size: 80,
+    accessorFn: (row) => row.total_cost || 0,
+    cell: ({ row }) => {
+      const cost = row.original.total_cost || 0;
+      const isExpensive = cost >= COST_ALERT_USD;
+      return (
+        <span className={`font-mono text-xs ${isExpensive ? "text-orange-600 dark:text-orange-400 font-semibold" : ""}`}>
+          {isExpensive && "⚠ "}{formatCostCompact(cost)}
+        </span>
+      );
+    },
   },
   {
     id: "duration",
     header: "Duration",
-    size: 100,
+    size: 90,
     accessorFn: (row) => (row.ended_at ? row.ended_at - row.started_at : Infinity),
     cell: ({ row }) => (
       <span className="font-mono text-xs">
@@ -96,7 +150,7 @@ const columns: ColumnDef<TraceRow>[] = [
   {
     id: "started_at",
     header: "Started",
-    size: 120,
+    size: 100,
     accessorFn: (row) => row.started_at,
     cell: ({ row }) => (
       <span className="text-xs text-gray-500">{timeAgo(row.original.started_at)}</span>
@@ -242,15 +296,7 @@ export default function TraceList() {
             {({ index, style }) => {
               const row = rows[index];
               const isSelected = index === selectedIdx;
-              // Parse metadata for cost if available
-              let cost: number | null = null;
-              if (row.original.metadata) {
-                try {
-                  const meta = JSON.parse(row.original.metadata);
-                  cost = meta.total_cost ?? null;
-                } catch { /* ignore */ }
-              }
-              const isExpensive = cost != null && cost >= COST_ALERT_USD;
+              const isExpensive = (row.original.total_cost || 0) >= COST_ALERT_USD;
 
               return (
                 <div
