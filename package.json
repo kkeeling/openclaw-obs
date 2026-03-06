@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-obs",
+  "version": "0.1.0",
+  "description": "OpenClaw local observability plugin + dashboard",
+  "type": "module",
+  "main": "dist/plugin/index.js",
+  "bin": {
+    "openclaw-obs": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["openclaw", "observability", "tracing"],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
