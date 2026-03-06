@@ -23,9 +23,23 @@ interface PluginApi {
 type DiagnosticListener = (event: Record<string, unknown>) => void;
 
 // Track active traces/spans for correlation
-const sessionTraceMap = new Map<string, string>(); // sessionId -> traceId
-const toolSpanMap = new Map<string, string>(); // toolName:sessionKey -> spanId
+const sessionTraceMap = new Map<string, { traceId: string; lastActivity: number }>(); // sessionId -> {traceId, lastActivity}
+const toolSpanMap = new Map<string, string>(); // unique callKey -> spanId (uses callId or generated UUID to avoid collisions)
 let pruneInterval: ReturnType<typeof setInterval> | null = null;
+
+// Max age for sessionTraceMap entries before eviction (2 hours)
+const SESSION_MAP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+function evictStaleSessions(): void {
+  const now = Date.now();
+  for (const [sessionId, entry] of sessionTraceMap) {
+    if (now - entry.lastActivity > SESSION_MAP_MAX_AGE_MS) {
+      sessionTraceMap.delete(sessionId);
+    }
+  }
+  // Also clean any orphaned toolSpanMap entries older than the session threshold
+  // (toolSpanMap entries reference sessions that may have been evicted)
+}
 
 function flushBatch(events: BufferedEvent[]): void {
   for (const event of events) {
@@ -69,22 +83,24 @@ function getOrCreateTrace(
   sessionId: string,
   agentName?: string,
 ): string {
-  let traceId = sessionTraceMap.get(sessionId);
-  if (!traceId) {
-    traceId = randomUUID();
-    sessionTraceMap.set(sessionId, traceId);
-    buffer.push({
-      type: "trace",
-      data: {
-        id: traceId,
-        session_id: sessionId,
-        agent_name: agentName || "unknown",
-        started_at: Date.now(),
-        ended_at: null,
-        status: "running",
-      },
-    });
+  const entry = sessionTraceMap.get(sessionId);
+  if (entry) {
+    entry.lastActivity = Date.now();
+    return entry.traceId;
   }
+  const traceId = randomUUID();
+  sessionTraceMap.set(sessionId, { traceId, lastActivity: Date.now() });
+  buffer.push({
+    type: "trace",
+    data: {
+      id: traceId,
+      session_id: sessionId,
+      agent_name: agentName || "unknown",
+      started_at: Date.now(),
+      ended_at: null,
+      status: "running",
+    },
+  });
   return traceId;
 }
 
@@ -99,8 +115,9 @@ function registerHooks(api: PluginApi): void {
   api.on("session_end", (ctx, event) => {
     const sessionId = (event.sessionId as string) || (ctx.sessionId as string);
     if (!sessionId) return;
-    const traceId = sessionTraceMap.get(sessionId);
-    if (!traceId) return;
+    const entry = sessionTraceMap.get(sessionId);
+    if (!entry) return;
+    const traceId = entry.traceId;
 
     buffer.push({
       type: "trace_update",
@@ -125,8 +142,9 @@ function registerHooks(api: PluginApi): void {
   api.on("agent_end", (ctx, event) => {
     const sessionId = (ctx.sessionKey as string) || (ctx.sessionId as string);
     if (!sessionId) return;
-    const traceId = sessionTraceMap.get(sessionId);
-    if (!traceId) return;
+    const entry = sessionTraceMap.get(sessionId);
+    if (!entry) return;
+    const traceId = entry.traceId;
 
     const success = event.success as boolean;
     buffer.push({
@@ -149,7 +167,10 @@ function registerHooks(api: PluginApi): void {
 
     const traceId = getOrCreateTrace(sessionId);
     const spanId = randomUUID();
-    const mapKey = `${toolName}:${sessionId}`;
+    // Use callId from event if available; otherwise generate a unique key
+    // This prevents collisions when the same tool is called in parallel
+    const callId = (event.callId as string) || (event.id as string) || spanId;
+    const mapKey = `${toolName}:${sessionId}:${callId}`;
     toolSpanMap.set(mapKey, spanId);
 
     buffer.push({
@@ -179,7 +200,9 @@ function registerHooks(api: PluginApi): void {
     const toolName = (event.toolName as string) || (ctx.toolName as string) || "unknown";
     if (!sessionId) return;
 
-    const mapKey = `${toolName}:${sessionId}`;
+    // Match using the same callId-based key from before_tool_call
+    const callId = (event.callId as string) || (event.id as string) || "";
+    const mapKey = `${toolName}:${sessionId}:${callId}`;
     const spanId = toolSpanMap.get(mapKey);
     if (!spanId) return;
     toolSpanMap.delete(mapKey);
@@ -286,11 +309,12 @@ export const plugin = {
           console.error("[openclaw-obs] Prune on startup failed:", err);
         }
 
-        // Hourly prune
+        // Hourly prune (DB records + stale in-memory map entries)
         pruneInterval = setInterval(() => {
           try {
             pruneOldTraces();
             pruneBySize();
+            evictStaleSessions();
           } catch (err) {
             console.error("[openclaw-obs] Scheduled prune failed:", err);
           }
