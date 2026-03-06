@@ -327,7 +327,8 @@ export function getStats(params: StatsParams) {
     .prepare(
       `SELECT COALESCE(SUM(s.cost_usd), 0) as total_cost
       FROM spans s
-      JOIN traces t ON s.trace_id = t.id ${where}`,
+      JOIN traces t ON s.trace_id = t.id
+      ${where}`,
     )
     .get(values) as { total_cost: number };
 
@@ -366,6 +367,10 @@ export function getStats(params: StatsParams) {
     error_count: number;
   }>;
 
+  const modelWhere = conditions.length > 0
+    ? `WHERE ${conditions.join(" AND ")} AND s.model IS NOT NULL`
+    : "WHERE s.model IS NOT NULL";
+
   const modelBreakdown = d
     .prepare(
       `SELECT
@@ -376,8 +381,7 @@ export function getStats(params: StatsParams) {
         COALESCE(SUM(s.cost_usd), 0) as total_cost
       FROM spans s
       JOIN traces t ON s.trace_id = t.id
-      ${where}
-      WHERE s.model IS NOT NULL
+      ${modelWhere}
       GROUP BY s.model
       ORDER BY total_cost DESC`,
     )
