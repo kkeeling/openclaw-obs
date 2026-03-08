@@ -13,7 +13,7 @@ function isPortAvailable(port: number): Promise<boolean> {
     server.once("listening", () => {
       server.close(() => resolve(true));
     });
-    server.listen(port, "127.0.0.1");
+    server.listen(port, "0.0.0.0");
   });
 }
 
@@ -52,7 +52,7 @@ export async function startServer(): Promise<{ port: number; close: () => void }
   const port = await findAvailablePort();
 
   return new Promise((resolve) => {
-    const server = app.listen(port, "127.0.0.1", () => {
+    const server = app.listen(port, "0.0.0.0", () => {
       console.log(`[openclaw-obs] Dashboard running at http://127.0.0.1:${port}`);
       resolve({
         port,
