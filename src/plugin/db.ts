@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS traces (
   started_at INTEGER NOT NULL,
   ended_at INTEGER,
   status TEXT DEFAULT 'running',
+  parent_trace_id TEXT,
   metadata TEXT
 );
 
@@ -39,12 +40,41 @@ CREATE TABLE IF NOT EXISTS spans (
   metadata TEXT
 );
 
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL REFERENCES traces(id),
+  role TEXT NOT NULL,
+  content TEXT,
+  tool_name TEXT,
+  timestamp INTEGER NOT NULL,
+  sequence INTEGER NOT NULL,
+  metadata TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans(kind);
 CREATE INDEX IF NOT EXISTS idx_traces_agent ON traces(agent_name);
 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at);
 CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id);
+CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
 `;
+
+const MIGRATIONS = [
+  // Add parent_trace_id to traces if missing
+  `ALTER TABLE traces ADD COLUMN parent_trace_id TEXT`,
+  // Create messages table if missing (for existing DBs)
+  `CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES traces(id),
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_name TEXT,
+    timestamp INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    metadata TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id)`,
+];
 
 export interface TraceRow {
   id: string;
@@ -53,6 +83,18 @@ export interface TraceRow {
   started_at: number;
   ended_at: number | null;
   status: string;
+  parent_trace_id: string | null;
+  metadata: string | null;
+}
+
+export interface MessageRow {
+  id: string;
+  trace_id: string;
+  role: string;
+  content: string | null;
+  tool_name: string | null;
+  timestamp: number;
+  sequence: number;
   metadata: string | null;
 }
 
@@ -129,6 +171,16 @@ export function getDb(): Database.Database {
   }
 
   db.exec(SCHEMA);
+
+  // Run migrations for existing DBs
+  for (const migration of MIGRATIONS) {
+    try {
+      db.exec(migration);
+    } catch {
+      // Ignore errors (e.g., column already exists)
+    }
+  }
+
   return db;
 }
 
@@ -141,21 +193,55 @@ export function closeDb(): void {
 
 // ---- Write operations ----
 
-export function upsertTrace(trace: Omit<TraceRow, "metadata"> & { metadata?: Record<string, unknown> | null }): void {
+export function upsertTrace(trace: Omit<TraceRow, "metadata" | "parent_trace_id"> & { metadata?: Record<string, unknown> | null; parent_trace_id?: string | null }): void {
   const d = getDb();
   const stmt = d.prepare(`
-    INSERT INTO traces (id, session_id, agent_name, started_at, ended_at, status, metadata)
-    VALUES (@id, @session_id, @agent_name, @started_at, @ended_at, @status, @metadata)
+    INSERT INTO traces (id, session_id, agent_name, started_at, ended_at, status, parent_trace_id, metadata)
+    VALUES (@id, @session_id, @agent_name, @started_at, @ended_at, @status, @parent_trace_id, @metadata)
     ON CONFLICT(id) DO UPDATE SET
       ended_at = COALESCE(@ended_at, traces.ended_at),
       status = COALESCE(@status, traces.status),
+      parent_trace_id = COALESCE(@parent_trace_id, traces.parent_trace_id),
       metadata = COALESCE(@metadata, traces.metadata)
   `);
   stmt.run({
     ...trace,
     ended_at: trace.ended_at ?? null,
+    parent_trace_id: trace.parent_trace_id ?? null,
     metadata: trace.metadata ? JSON.stringify(trace.metadata) : null,
   });
+}
+
+const MAX_MESSAGE_CONTENT_BYTES = 100 * 1024; // 100KB
+
+function truncateMessageContent(content: string | null | undefined): string | null {
+  if (content == null) return null;
+  if (Buffer.byteLength(content, "utf-8") > MAX_MESSAGE_CONTENT_BYTES) {
+    const buf = Buffer.from(content, "utf-8");
+    return buf.subarray(0, MAX_MESSAGE_CONTENT_BYTES).toString("utf-8") + "\n[truncated]";
+  }
+  return content;
+}
+
+export function insertMessage(msg: MessageRow): void {
+  const d = getDb();
+  const stmt = d.prepare(`
+    INSERT OR IGNORE INTO messages (id, trace_id, role, content, tool_name, timestamp, sequence, metadata)
+    VALUES (@id, @trace_id, @role, @content, @tool_name, @timestamp, @sequence, @metadata)
+  `);
+  stmt.run({
+    ...msg,
+    content: truncateMessageContent(msg.content),
+    tool_name: msg.tool_name ?? null,
+    metadata: msg.metadata ?? null,
+  });
+}
+
+export function getMessages(traceId: string): MessageRow[] {
+  const d = getDb();
+  return d
+    .prepare("SELECT * FROM messages WHERE trace_id = @traceId ORDER BY sequence ASC, timestamp ASC")
+    .all({ traceId }) as MessageRow[];
 }
 
 export function insertSpan(span: Omit<SpanRow, "input_json" | "output_json"> & { input_json?: string | null; output_json?: string | null }): void {
@@ -285,7 +371,7 @@ export function listTraces(params: TraceListParams): TraceRow[] {
     .all({ ...values, limit, offset }) as TraceRow[];
 }
 
-export function getTrace(id: string): (TraceRow & { spans: SpanRow[] }) | null {
+export function getTrace(id: string): (TraceRow & { spans: SpanRow[]; messages: MessageRow[]; children: Array<{ id: string; agent_name: string; started_at: number; status: string }> }) | null {
   const d = getDb();
   const trace = d
     .prepare("SELECT * FROM traces WHERE id = @id")
@@ -294,7 +380,13 @@ export function getTrace(id: string): (TraceRow & { spans: SpanRow[] }) | null {
   const spans = d
     .prepare("SELECT * FROM spans WHERE trace_id = @id ORDER BY started_at ASC")
     .all({ id }) as SpanRow[];
-  return { ...trace, spans };
+  const messages = d
+    .prepare("SELECT * FROM messages WHERE trace_id = @id ORDER BY sequence ASC, timestamp ASC")
+    .all({ id }) as MessageRow[];
+  const children = d
+    .prepare("SELECT id, agent_name, started_at, status FROM traces WHERE parent_trace_id = @id ORDER BY started_at ASC")
+    .all({ id }) as Array<{ id: string; agent_name: string; started_at: number; status: string }>;
+  return { ...trace, spans, messages, children };
 }
 
 export interface StatsParams {
@@ -439,6 +531,7 @@ export function pruneOldTraces(): number {
   const d = getDb();
   const cutoff = Date.now() - getRetentionDays() * 24 * 60 * 60 * 1000;
 
+  d.prepare("DELETE FROM messages WHERE trace_id IN (SELECT id FROM traces WHERE started_at < @cutoff)").run({ cutoff });
   d.prepare("DELETE FROM spans WHERE trace_id IN (SELECT id FROM traces WHERE started_at < @cutoff)").run({ cutoff });
   const result = d.prepare("DELETE FROM traces WHERE started_at < @cutoff").run({ cutoff });
   return result.changes;
@@ -469,6 +562,7 @@ export function pruneBySize(): number {
 
     const ids = oldest.map((r) => r.id);
     const placeholders = ids.map(() => "?").join(",");
+    d.prepare(`DELETE FROM messages WHERE trace_id IN (${placeholders})`).run(ids);
     d.prepare(`DELETE FROM spans WHERE trace_id IN (${placeholders})`).run(ids);
     const result = d
       .prepare(`DELETE FROM traces WHERE id IN (${placeholders})`)

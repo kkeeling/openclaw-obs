@@ -1,0 +1,8 @@
+{
+  "id": "openclaw-obs",
+  "name": "OpenClaw Observability",
+  "description": "Local-first observability plugin — captures LLM traces, tool invocations, and session metadata to SQLite with a web dashboard",
+  "version": "0.1.0",
+  "entry": "./dist/plugin/index.js",
+  "configSchema": {}
+}

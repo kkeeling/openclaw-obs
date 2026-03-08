@@ -33,8 +33,22 @@ export interface SpanRow {
   metadata: string | null;
 }
 
+export interface MessageRow {
+  id: string;
+  trace_id: string;
+  role: string;
+  content: string | null;
+  tool_name: string | null;
+  timestamp: number;
+  sequence: number;
+  metadata: string | null;
+}
+
 export interface TraceDetail extends TraceRow {
   spans: SpanRow[];
+  messages: MessageRow[];
+  children: Array<{ id: string; agent_name: string; started_at: number; status: string }>;
+  parent_trace_id: string | null;
 }
 
 export interface Stats {

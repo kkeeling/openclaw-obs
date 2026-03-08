@@ -1,5 +1,8 @@
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Waterfall from "../components/Waterfall";
+import ConversationView from "../components/ConversationView";
+import SubAgentLinks from "../components/SubAgentLinks";
 import { useTraceDetail } from "../hooks/useApi";
 
 function StatusBadge({ status }: { status: string }) {
@@ -31,10 +34,13 @@ function formatTimestamp(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
+type TabId = "conversation" | "timeline";
+
 export default function TraceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { data: trace, loading } = useTraceDetail(id!);
+  const [activeTab, setActiveTab] = useState<TabId>("conversation");
 
   if (loading && !trace) {
     return (
@@ -70,6 +76,13 @@ export default function TraceDetail() {
   );
 
   const models = [...new Set(trace.spans.filter((s) => s.model).map((s) => s.model!))];
+  const hasChildren = trace.children && trace.children.length > 0;
+  const hasParent = !!trace.parent_trace_id;
+
+  const tabs: { id: TabId; label: string; count?: number }[] = [
+    { id: "conversation", label: "Conversation", count: trace.messages?.length || 0 },
+    { id: "timeline", label: "Timeline", count: trace.spans.length },
+  ];
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto space-y-4">
@@ -90,6 +103,11 @@ export default function TraceDetail() {
         <div className="flex items-center gap-3 mb-3">
           <h1 className="text-lg font-semibold">{trace.agent_name}</h1>
           <StatusBadge status={trace.status} />
+          {hasParent && (
+            <span className="text-xs text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950/30 px-2 py-0.5 rounded">
+              Sub-agent
+            </span>
+          )}
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
           <div>
@@ -123,26 +141,63 @@ export default function TraceDetail() {
             </p>
           </div>
           <div>
-            <p className="text-xs text-gray-500 uppercase tracking-wide">Spans</p>
-            <p className="font-mono mt-0.5">{trace.spans.length}</p>
+            <p className="text-xs text-gray-500 uppercase tracking-wide">Messages</p>
+            <p className="font-mono mt-0.5">{trace.messages?.length || 0}</p>
           </div>
         </div>
       </div>
 
-      {/* Waterfall */}
-      <div>
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-            Timeline ({trace.spans.length} spans)
-          </h2>
-          <span className="text-sm font-mono text-gray-500">{formatCost(totalCost)}</span>
-        </div>
-        <Waterfall
-          spans={trace.spans}
-          traceStart={trace.started_at}
-          traceEnd={traceEnd}
+      {/* Sub-agent links */}
+      {(hasParent || hasChildren) && (
+        <SubAgentLinks
+          parentTraceId={trace.parent_trace_id}
+          children={trace.children || []}
         />
+      )}
+
+      {/* Tabs */}
+      <div className="border-b border-gray-200 dark:border-gray-800">
+        <div className="flex gap-0">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? "border-accent text-accent"
+                  : "border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+              }`}
+            >
+              {tab.label}
+              {tab.count !== undefined && (
+                <span className="ml-1.5 text-xs text-gray-400">({tab.count})</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Tab content */}
+      {activeTab === "conversation" ? (
+        <ConversationView
+          messages={trace.messages || []}
+          spans={trace.spans}
+        />
+      ) : (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+              Timeline ({trace.spans.length} spans)
+            </h2>
+            <span className="text-sm font-mono text-gray-500">{formatCost(totalCost)}</span>
+          </div>
+          <Waterfall
+            spans={trace.spans}
+            traceStart={trace.started_at}
+            traceEnd={traceEnd}
+          />
+        </div>
+      )}
     </div>
   );
 }
