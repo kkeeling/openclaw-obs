@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import {
   listTraces,
   getTrace,
+  getMessages,
   getStats,
   getHealth,
   pruneAll,
@@ -32,7 +33,7 @@ export function createRouter(): Router {
     }
   });
 
-  // GET /api/traces/:id - Get single trace with spans
+  // GET /api/traces/:id - Get single trace with spans, messages, children
   router.get("/api/traces/:id", (req: Request, res: Response) => {
     try {
       const trace = getTrace(req.params.id as string);
@@ -43,6 +44,17 @@ export function createRouter(): Router {
       res.json(trace);
     } catch (err) {
       console.error("[openclaw-obs] GET /api/traces/:id error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // GET /api/traces/:id/messages - Get messages for a trace
+  router.get("/api/traces/:id/messages", (req: Request, res: Response) => {
+    try {
+      const messages = getMessages(req.params.id as string);
+      res.json(messages);
+    } catch (err) {
+      console.error("[openclaw-obs] GET /api/traces/:id/messages error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });

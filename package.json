@@ -13,6 +13,9 @@
   },
   "keywords": ["openclaw", "observability", "tracing"],
   "license": "MIT",
+  "openclaw": {
+    "extensions": ["./dist/plugin/index.js"]
+  },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "express": "^4.21.0"
