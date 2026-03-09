@@ -152,7 +152,11 @@ function MessageBubble({ message }: { message: MessageRow }) {
   );
 }
 
+const PAGE_SIZE = 50;
+
 export default function ConversationView({ messages, spans: _spans }: ConversationViewProps) {
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
   if (messages.length === 0) {
     return (
       <div className="text-center py-12 text-gray-400 dark:text-gray-600">
@@ -163,11 +167,29 @@ export default function ConversationView({ messages, spans: _spans }: Conversati
     );
   }
 
+  const visibleMessages = messages.slice(0, visibleCount);
+  const hasMore = visibleCount < messages.length;
+
   return (
     <div className="py-4 space-y-0.5 max-w-4xl mx-auto">
-      {messages.map((msg) => (
+      {visibleMessages.map((msg) => (
         <MessageBubble key={msg.id} message={msg} />
       ))}
+      {hasMore && (
+        <div className="text-center py-4">
+          <button
+            onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
+            className="px-4 py-2 text-sm font-medium text-accent bg-accent/10 hover:bg-accent/20 rounded-lg transition-colors"
+          >
+            Load more ({messages.length - visibleCount} remaining)
+          </button>
+        </div>
+      )}
+      {!hasMore && messages.length > PAGE_SIZE && (
+        <div className="text-center py-2 text-xs text-gray-400">
+          All {messages.length} messages loaded
+        </div>
+      )}
     </div>
   );
 }
