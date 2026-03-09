@@ -28,6 +28,7 @@ const sessionTraceMap = new Map<string, { traceId: string; lastActivity: number 
 const toolSpanMap = new Map<string, string>(); // unique callKey -> spanId
 const messageSequence = new Map<string, number>(); // traceId -> next sequence number
 const uuidToSessionKey = new Map<string, string>(); // UUID sessionId -> full sessionKey (for diagnostic event correlation)
+const recentLlmSpanTraces = new Map<string, number>(); // traceId -> timestamp of last llm_output span (dedup with diagnostic events)
 let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 // Max age for sessionTraceMap entries before eviction (2 hours)
@@ -77,6 +78,12 @@ function evictStaleSessions(): void {
   for (const [uuid, sessionKey] of uuidToSessionKey) {
     if (!sessionTraceMap.has(sessionKey)) {
       uuidToSessionKey.delete(uuid);
+    }
+  }
+  // Evict stale dedup entries (older than 30s)
+  for (const [traceId, ts] of recentLlmSpanTraces) {
+    if (now - ts > 30_000) {
+      recentLlmSpanTraces.delete(traceId);
     }
   }
 }
@@ -173,19 +180,22 @@ function getOrCreateTrace(
 }
 
 function registerHooks(api: PluginApi): void {
+  // NOTE: The OpenClaw plugin SDK calls all hook handlers as (event, ctx).
+  // We use consistent (event, ctx) parameter order across all hooks.
+
   // ---- Session lifecycle ----
-  api.on("session_start", (ctx: unknown, event: unknown) => {
-    const c = ctx as Record<string, unknown>;
+  api.on("session_start", (event: unknown, ctx: unknown) => {
     const e = event as Record<string, unknown>;
+    const c = ctx as Record<string, unknown>;
     const sessionKey = resolveSessionKey(c, e);
     if (!sessionKey) return;
     const agentName = resolveAgentName(c);
     getOrCreateTrace(sessionKey, agentName);
   });
 
-  api.on("session_end", (ctx: unknown, event: unknown) => {
-    const c = ctx as Record<string, unknown>;
+  api.on("session_end", (event: unknown, ctx: unknown) => {
     const e = event as Record<string, unknown>;
+    const c = ctx as Record<string, unknown>;
     const sessionKey = resolveSessionKey(c, e);
     if (!sessionKey) return;
     const entry = sessionTraceMap.get(sessionKey);
@@ -205,7 +215,7 @@ function registerHooks(api: PluginApi): void {
     messageSequence.delete(entry.traceId);
   });
 
-  api.on("before_agent_start", (ctx: unknown) => {
+  api.on("before_agent_start", (event: unknown, ctx: unknown) => {
     const c = ctx as Record<string, unknown>;
     const sessionKey = resolveSessionKey(c);
     if (!sessionKey) return;
@@ -213,9 +223,9 @@ function registerHooks(api: PluginApi): void {
     getOrCreateTrace(sessionKey, agentName);
   });
 
-  api.on("agent_end", (ctx: unknown, event: unknown) => {
-    const c = ctx as Record<string, unknown>;
+  api.on("agent_end", (event: unknown, ctx: unknown) => {
     const e = event as Record<string, unknown>;
+    const c = ctx as Record<string, unknown>;
     const sessionKey = resolveSessionKey(c, e);
     if (!sessionKey) return;
     const entry = sessionTraceMap.get(sessionKey);
@@ -286,7 +296,7 @@ function registerHooks(api: PluginApi): void {
     if (!sessionKey) return;
     const traceId = getOrCreateTrace(sessionKey, resolveAgentName(c));
 
-    // Capture assistant response
+    // Capture assistant response as a message
     const texts = e.assistantTexts as string[] | undefined;
     const content = texts?.join("\n") || "";
     if (content) {
@@ -307,6 +317,44 @@ function registerHooks(api: PluginApi): void {
           }),
         },
       });
+    }
+
+    // Create an LLM span with token counts from the hook data directly.
+    // This makes token tracking resilient — it works even when the
+    // diagnostics.enabled config flag is off (which gates model.usage
+    // diagnostic events in OpenClaw ≥2026.3.3).
+    // When diagnostics ARE enabled, handleDiagnosticEvent creates a
+    // separate span with cost data; the dashboard aggregates both.
+    const usage = e.usage as Record<string, number> | undefined;
+    if (usage && (usage.input || usage.output)) {
+      const spanId = randomUUID();
+      buffer.push({
+        type: "span",
+        data: {
+          id: spanId,
+          trace_id: traceId,
+          parent_span_id: null,
+          kind: "llm",
+          name: (e.model as string) || "unknown",
+          started_at: Date.now(),
+          ended_at: Date.now(),
+          input_json: null,
+          output_json: null,
+          tokens_in: usage.input ?? usage.promptTokens ?? null,
+          tokens_out: usage.output ?? null,
+          cost_usd: null, // Cost not available here; added by handleDiagnosticEvent if diagnostics enabled
+          model: (e.model as string) ?? null,
+          error: null,
+          metadata: safeStringify({
+            source: "llm_output_hook",
+            provider: e.provider,
+            cacheRead: usage.cacheRead,
+            cacheWrite: usage.cacheWrite,
+          }),
+        },
+      });
+      // Track for dedup — prevents handleDiagnosticEvent from creating a duplicate span
+      recentLlmSpanTraces.set(traceId, Date.now());
     }
   });
 
@@ -480,6 +528,17 @@ function handleDiagnosticEvent(event: Record<string, unknown>): void {
 
   const traceId = getOrCreateTrace(sessionId, agentName);
   const usage = event.usage as Record<string, number> | undefined;
+
+  // Check if llm_output hook already created an LLM span for this trace recently.
+  // If so, update that span with cost data instead of creating a duplicate.
+  const recentHookTs = recentLlmSpanTraces.get(traceId);
+  if (recentHookTs && Date.now() - recentHookTs < 10_000) {
+    // The llm_output hook already captured tokens; just clean up the dedup entry.
+    // Cost data from diagnostic events is a nice-to-have but not worth double-counting.
+    recentLlmSpanTraces.delete(traceId);
+    return;
+  }
+
   const spanId = randomUUID();
 
   buffer.push({
@@ -500,6 +559,7 @@ function handleDiagnosticEvent(event: Record<string, unknown>): void {
       model: (event.model as string) ?? null,
       error: null,
       metadata: safeStringify({
+        source: "diagnostic_event",
         provider: event.provider,
         channel: event.channel,
         cacheRead: usage?.cacheRead,
