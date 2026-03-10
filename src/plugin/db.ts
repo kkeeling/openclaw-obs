@@ -286,6 +286,16 @@ export function updateSpan(id: string, updates: Partial<SpanRow>): void {
   d.prepare(`UPDATE spans SET ${fields.join(", ")} WHERE id = @id`).run(values);
 }
 
+export function updateLatestLlmSpanCost(traceId: string, costUsd: number): void {
+  const d = getDb();
+  d.prepare(
+    `UPDATE spans SET cost_usd = @cost WHERE id = (
+      SELECT id FROM spans WHERE trace_id = @traceId AND kind = 'llm'
+      ORDER BY started_at DESC LIMIT 1
+    )`
+  ).run({ traceId, cost: costUsd });
+}
+
 export function updateTrace(id: string, updates: Partial<TraceRow>): void {
   const d = getDb();
   const fields: string[] = [];

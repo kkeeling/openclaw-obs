@@ -4,6 +4,7 @@ import {
   insertSpan,
   updateSpan,
   updateTrace,
+  updateLatestLlmSpanCost,
   insertMessage,
   pruneOldTraces,
   pruneBySize,
@@ -530,12 +531,19 @@ function handleDiagnosticEvent(event: Record<string, unknown>): void {
   const usage = event.usage as Record<string, number> | undefined;
 
   // Check if llm_output hook already created an LLM span for this trace recently.
-  // If so, update that span with cost data instead of creating a duplicate.
+  // If so, UPDATE that span with cost data instead of creating a duplicate.
   const recentHookTs = recentLlmSpanTraces.get(traceId);
   if (recentHookTs && Date.now() - recentHookTs < 10_000) {
-    // The llm_output hook already captured tokens; just clean up the dedup entry.
-    // Cost data from diagnostic events is a nice-to-have but not worth double-counting.
     recentLlmSpanTraces.delete(traceId);
+    // Merge cost into the existing span created by llm_output hook
+    const costUsd = (event.costUsd as number) ?? null;
+    if (costUsd != null) {
+      try {
+        updateLatestLlmSpanCost(traceId, costUsd);
+      } catch (err) {
+        console.error("[openclaw-obs] Failed to update span cost:", err);
+      }
+    }
     return;
   }
 
