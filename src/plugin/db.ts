@@ -141,7 +141,7 @@ export interface AnnotationRow {
   id: number;
   trace_id: string;
   annotator_id: string;
-  verdict: string; // 'pass' | 'fail' | 'interesting'
+  verdict: string; // 'pass' | 'fail' | 'flag'
   failure_category: string | null;
   notes: string | null;
   created_at: number;

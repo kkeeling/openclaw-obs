@@ -137,8 +137,8 @@ export function createRouter(): Router {
         res.status(400).json({ error: "trace_id, annotator_id, and verdict are required" });
         return;
       }
-      if (!["pass", "fail", "interesting"].includes(verdict)) {
-        res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'interesting'" });
+      if (!["pass", "fail", "flag"].includes(verdict)) {
+        res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'flag'" });
         return;
       }
       const annotation = createAnnotation({
@@ -179,8 +179,8 @@ export function createRouter(): Router {
           res.status(400).json({ error: "Each annotation requires trace_id, annotator_id, and verdict" });
           return;
         }
-        if (!["pass", "fail", "interesting"].includes(item.verdict)) {
-          res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'interesting'" });
+        if (!["pass", "fail", "flag"].includes(item.verdict)) {
+          res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'flag'" });
           return;
         }
       }
@@ -213,8 +213,8 @@ export function createRouter(): Router {
       const { verdict, failure_category, notes } = req.body;
       const updates: Record<string, unknown> = {};
       if (verdict !== undefined) {
-        if (!["pass", "fail", "interesting"].includes(verdict)) {
-          res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'interesting'" });
+        if (!["pass", "fail", "flag"].includes(verdict)) {
+          res.status(400).json({ error: "verdict must be 'pass', 'fail', or 'flag'" });
           return;
         }
         updates.verdict = verdict;

@@ -66,9 +66,9 @@ function AnnotatePanel({ traceId, annotations, onAnnotated }: { traceId: string;
   const verdictColors: Record<string, string> = {
     pass: "text-green-600 dark:text-green-400",
     fail: "text-red-600 dark:text-red-400",
-    interesting: "text-yellow-600 dark:text-yellow-400",
+    flag: "text-yellow-600 dark:text-yellow-400",
   };
-  const verdictEmoji: Record<string, string> = { pass: "✓", fail: "✗", interesting: "★" };
+  const verdictEmoji: Record<string, string> = { pass: "✓", fail: "✗", flag: "★" };
 
   return (
     <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-4">
@@ -115,7 +115,7 @@ function AnnotatePanel({ traceId, annotations, onAnnotated }: { traceId: string;
       {showForm && (
         <div className="space-y-2 border-t border-gray-100 dark:border-gray-800 pt-3">
           <div className="flex gap-2">
-            {["pass", "fail", "interesting"].map((v) => (
+            {["pass", "fail", "flag"].map((v) => (
               <button
                 key={v}
                 onClick={() => setVerdict(v)}

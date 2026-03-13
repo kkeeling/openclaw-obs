@@ -77,7 +77,7 @@ export default function FilterPills({ filters, onChange }: FilterPillsProps) {
         <option value="">All Verdicts</option>
         <option value="pass">✓ Pass</option>
         <option value="fail">✗ Fail</option>
-        <option value="interesting">★ Interesting</option>
+        <option value="flag">★ Flag</option>
       </select>
 
       {/* Annotated filter */}
