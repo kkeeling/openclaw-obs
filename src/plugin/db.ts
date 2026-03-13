@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS traces (
   ended_at INTEGER,
   status TEXT DEFAULT 'running',
   parent_trace_id TEXT,
+  mc_task_id TEXT,
   metadata TEXT
 );
 
@@ -51,12 +52,35 @@ CREATE TABLE IF NOT EXISTS messages (
   metadata TEXT
 );
 
+CREATE TABLE IF NOT EXISTS annotations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL,
+  annotator_id TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  failure_category TEXT,
+  notes TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS eval_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL,
+  eval_name TEXT NOT NULL,
+  passed INTEGER NOT NULL,
+  score REAL,
+  evidence TEXT,
+  created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_kind ON spans(kind);
 CREATE INDEX IF NOT EXISTS idx_traces_agent ON traces(agent_name);
 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at);
 CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_trace ON annotations(trace_id);
+CREATE INDEX IF NOT EXISTS idx_annotations_verdict ON annotations(verdict);
+CREATE INDEX IF NOT EXISTS idx_eval_results_trace ON eval_results(trace_id);
 `;
 
 const MIGRATIONS = [
@@ -74,6 +98,31 @@ const MIGRATIONS = [
     metadata TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_messages_trace ON messages(trace_id)`,
+  // Eval system: add mc_task_id to traces
+  `ALTER TABLE traces ADD COLUMN mc_task_id TEXT`,
+  // Eval system: annotations table
+  `CREATE TABLE IF NOT EXISTS annotations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL,
+    annotator_id TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    failure_category TEXT,
+    notes TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_annotations_trace ON annotations(trace_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_annotations_verdict ON annotations(verdict)`,
+  // Eval system: eval_results table (Phase 2+)
+  `CREATE TABLE IF NOT EXISTS eval_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL,
+    eval_name TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    score REAL,
+    evidence TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_eval_results_trace ON eval_results(trace_id)`,
 ];
 
 export interface TraceRow {
@@ -84,7 +133,28 @@ export interface TraceRow {
   ended_at: number | null;
   status: string;
   parent_trace_id: string | null;
+  mc_task_id: string | null;
   metadata: string | null;
+}
+
+export interface AnnotationRow {
+  id: number;
+  trace_id: string;
+  annotator_id: string;
+  verdict: string; // 'pass' | 'fail' | 'flag'
+  failure_category: string | null;
+  notes: string | null;
+  created_at: number;
+}
+
+export interface EvalResultRow {
+  id: number;
+  trace_id: string;
+  eval_name: string;
+  passed: number; // 0 or 1
+  score: number | null;
+  evidence: string | null;
+  created_at: number;
 }
 
 export interface MessageRow {
@@ -193,21 +263,23 @@ export function closeDb(): void {
 
 // ---- Write operations ----
 
-export function upsertTrace(trace: Omit<TraceRow, "metadata" | "parent_trace_id"> & { metadata?: Record<string, unknown> | null; parent_trace_id?: string | null }): void {
+export function upsertTrace(trace: Omit<TraceRow, "metadata" | "parent_trace_id" | "mc_task_id"> & { metadata?: Record<string, unknown> | null; parent_trace_id?: string | null; mc_task_id?: string | null }): void {
   const d = getDb();
   const stmt = d.prepare(`
-    INSERT INTO traces (id, session_id, agent_name, started_at, ended_at, status, parent_trace_id, metadata)
-    VALUES (@id, @session_id, @agent_name, @started_at, @ended_at, @status, @parent_trace_id, @metadata)
+    INSERT INTO traces (id, session_id, agent_name, started_at, ended_at, status, parent_trace_id, mc_task_id, metadata)
+    VALUES (@id, @session_id, @agent_name, @started_at, @ended_at, @status, @parent_trace_id, @mc_task_id, @metadata)
     ON CONFLICT(id) DO UPDATE SET
       ended_at = COALESCE(@ended_at, traces.ended_at),
       status = COALESCE(@status, traces.status),
       parent_trace_id = COALESCE(@parent_trace_id, traces.parent_trace_id),
+      mc_task_id = COALESCE(@mc_task_id, traces.mc_task_id),
       metadata = COALESCE(@metadata, traces.metadata)
   `);
   stmt.run({
     ...trace,
     ended_at: trace.ended_at ?? null,
     parent_trace_id: trace.parent_trace_id ?? null,
+    mc_task_id: trace.mc_task_id ?? null,
     metadata: trace.metadata ? JSON.stringify(trace.metadata) : null,
   });
 }
@@ -323,6 +395,8 @@ export interface TraceListParams {
   until?: number;
   minCost?: number;
   search?: string;
+  verdict?: string;
+  annotated?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -364,6 +438,21 @@ export function listTraces(params: TraceListParams): TraceRow[] {
     );
     values.minCost = params.minCost;
   }
+  if (params.verdict) {
+    conditions.push(
+      "EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id AND a.verdict = @verdict)",
+    );
+    values.verdict = params.verdict;
+  }
+  if (params.annotated === true) {
+    conditions.push(
+      "EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)",
+    );
+  } else if (params.annotated === false) {
+    conditions.push(
+      "NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)",
+    );
+  }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const limit = params.limit || 100;
@@ -375,13 +464,15 @@ export function listTraces(params: TraceListParams): TraceRow[] {
         (SELECT GROUP_CONCAT(DISTINCT s.model) FROM spans s WHERE s.trace_id = t.id AND s.model IS NOT NULL) AS models,
         (SELECT COALESCE(SUM(s.tokens_in), 0) FROM spans s WHERE s.trace_id = t.id) AS total_tokens_in,
         (SELECT COALESCE(SUM(s.tokens_out), 0) FROM spans s WHERE s.trace_id = t.id) AS total_tokens_out,
-        (SELECT COALESCE(SUM(s.cost_usd), 0) FROM spans s WHERE s.trace_id = t.id) AS total_cost
+        (SELECT COALESCE(SUM(s.cost_usd), 0) FROM spans s WHERE s.trace_id = t.id) AS total_cost,
+        (SELECT COUNT(*) FROM annotations a WHERE a.trace_id = t.id) AS annotation_count,
+        (SELECT a.verdict FROM annotations a WHERE a.trace_id = t.id ORDER BY a.created_at DESC LIMIT 1) AS latest_verdict
       FROM traces t ${where} ORDER BY t.started_at DESC LIMIT @limit OFFSET @offset`,
     )
     .all({ ...values, limit, offset }) as TraceRow[];
 }
 
-export function getTrace(id: string): (TraceRow & { spans: SpanRow[]; messages: MessageRow[]; children: Array<{ id: string; agent_name: string; started_at: number; status: string }> }) | null {
+export function getTrace(id: string): (TraceRow & { spans: SpanRow[]; messages: MessageRow[]; annotations: AnnotationRow[]; children: Array<{ id: string; agent_name: string; started_at: number; status: string }> }) | null {
   const d = getDb();
   const trace = d
     .prepare("SELECT * FROM traces WHERE id = @id")
@@ -393,10 +484,13 @@ export function getTrace(id: string): (TraceRow & { spans: SpanRow[]; messages: 
   const messages = d
     .prepare("SELECT * FROM messages WHERE trace_id = @id ORDER BY sequence ASC, timestamp ASC")
     .all({ id }) as MessageRow[];
+  const annotations = d
+    .prepare("SELECT * FROM annotations WHERE trace_id = @id ORDER BY created_at DESC")
+    .all({ id }) as AnnotationRow[];
   const children = d
     .prepare("SELECT id, agent_name, started_at, status FROM traces WHERE parent_trace_id = @id ORDER BY started_at ASC")
     .all({ id }) as Array<{ id: string; agent_name: string; started_at: number; status: string }>;
-  return { ...trace, spans, messages, children };
+  return { ...trace, spans, messages, annotations, children };
 }
 
 export interface StatsParams {
@@ -535,16 +629,307 @@ export function getHealth() {
   };
 }
 
-// ---- Retention / Pruning ----
+// ---- Annotation CRUD ----
 
-export function pruneOldTraces(): number {
+export function createAnnotation(annotation: Omit<AnnotationRow, "id">): AnnotationRow {
   const d = getDb();
-  const cutoff = Date.now() - getRetentionDays() * 24 * 60 * 60 * 1000;
+  const stmt = d.prepare(`
+    INSERT INTO annotations (trace_id, annotator_id, verdict, failure_category, notes, created_at)
+    VALUES (@trace_id, @annotator_id, @verdict, @failure_category, @notes, @created_at)
+  `);
+  const result = stmt.run({
+    trace_id: annotation.trace_id,
+    annotator_id: annotation.annotator_id,
+    verdict: annotation.verdict,
+    failure_category: annotation.failure_category ?? null,
+    notes: annotation.notes ?? null,
+    created_at: annotation.created_at,
+  });
+  return {
+    id: Number(result.lastInsertRowid),
+    ...annotation,
+  };
+}
 
-  d.prepare("DELETE FROM messages WHERE trace_id IN (SELECT id FROM traces WHERE started_at < @cutoff)").run({ cutoff });
-  d.prepare("DELETE FROM spans WHERE trace_id IN (SELECT id FROM traces WHERE started_at < @cutoff)").run({ cutoff });
-  const result = d.prepare("DELETE FROM traces WHERE started_at < @cutoff").run({ cutoff });
-  return result.changes;
+export function bulkCreateAnnotations(annotations: Omit<AnnotationRow, "id">[]): AnnotationRow[] {
+  const d = getDb();
+  const stmt = d.prepare(`
+    INSERT INTO annotations (trace_id, annotator_id, verdict, failure_category, notes, created_at)
+    VALUES (@trace_id, @annotator_id, @verdict, @failure_category, @notes, @created_at)
+  `);
+  const results: AnnotationRow[] = [];
+  const insertAll = d.transaction(() => {
+    for (const annotation of annotations) {
+      const result = stmt.run({
+        trace_id: annotation.trace_id,
+        annotator_id: annotation.annotator_id,
+        verdict: annotation.verdict,
+        failure_category: annotation.failure_category ?? null,
+        notes: annotation.notes ?? null,
+        created_at: annotation.created_at,
+      });
+      results.push({
+        id: Number(result.lastInsertRowid),
+        ...annotation,
+      });
+    }
+  });
+  insertAll();
+  return results;
+}
+
+export function getAnnotation(id: number): AnnotationRow | null {
+  const d = getDb();
+  return (d.prepare("SELECT * FROM annotations WHERE id = @id").get({ id }) as AnnotationRow) ?? null;
+}
+
+export function updateAnnotation(id: number, updates: Partial<Pick<AnnotationRow, "verdict" | "failure_category" | "notes">>): void {
+  const d = getDb();
+  const fields: string[] = [];
+  const values: Record<string, unknown> = { id };
+
+  for (const [key, val] of Object.entries(updates)) {
+    fields.push(`${key} = @${key}`);
+    values[key] = val ?? null;
+  }
+
+  if (fields.length === 0) return;
+  d.prepare(`UPDATE annotations SET ${fields.join(", ")} WHERE id = @id`).run(values);
+}
+
+export function deleteAnnotation(id: number): void {
+  getDb().prepare("DELETE FROM annotations WHERE id = @id").run({ id });
+}
+
+export interface AnnotationListParams {
+  traceId?: string;
+  annotatorId?: string;
+  verdict?: string;
+  since?: number;
+  until?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export function listAnnotations(params: AnnotationListParams): AnnotationRow[] {
+  const d = getDb();
+  const conditions: string[] = [];
+  const values: Record<string, unknown> = {};
+
+  if (params.traceId) {
+    conditions.push("trace_id = @traceId");
+    values.traceId = params.traceId;
+  }
+  if (params.annotatorId) {
+    conditions.push("annotator_id = @annotatorId");
+    values.annotatorId = params.annotatorId;
+  }
+  if (params.verdict) {
+    conditions.push("verdict = @verdict");
+    values.verdict = params.verdict;
+  }
+  if (params.since) {
+    conditions.push("created_at >= @since");
+    values.since = params.since;
+  }
+  if (params.until) {
+    conditions.push("created_at <= @until");
+    values.until = params.until;
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = params.limit || 100;
+  const offset = params.offset || 0;
+
+  return d
+    .prepare(`SELECT * FROM annotations ${where} ORDER BY created_at DESC LIMIT @limit OFFSET @offset`)
+    .all({ ...values, limit, offset }) as AnnotationRow[];
+}
+
+/**
+ * Check if a trace has any annotations.
+ * Used by the prune pipeline to protect annotated traces.
+ */
+export function traceHasAnnotations(traceId: string): boolean {
+  const d = getDb();
+  const row = d
+    .prepare("SELECT 1 FROM annotations WHERE trace_id = @traceId LIMIT 1")
+    .get({ traceId });
+  return !!row;
+}
+
+// ---- Retention / Pruning (3-Stage Pipeline) ----
+
+/**
+ * 3-stage tiered retention pipeline:
+ * 1. After 7 days: compress content to gzip (hot → warm)
+ * 2. After 30 days: strip content, keep metadata only (warm → cold)
+ * 3. After 90 days: hard-delete unannotated traces (cold → gone)
+ *
+ * HARD RULE: Annotated traces are NEVER pruned. They are golden data.
+ */
+
+import { gzipSync } from "node:zlib";
+
+const WARM_DAYS = 7;
+const COLD_DAYS = 30;
+const DELETE_DAYS = 90;
+
+/**
+ * Stage 1: Compress content for traces older than 7 days (hot → warm).
+ * Gzip-compresses span input_json/output_json and message content to BLOB.
+ * Skips annotated traces.
+ */
+export function pruneStage1Compress(): number {
+  const d = getDb();
+  const cutoff = Date.now() - WARM_DAYS * 24 * 60 * 60 * 1000;
+  let compressed = 0;
+
+  // Find unannotated traces older than 7 days with uncompressed content
+  const traces = d.prepare(`
+    SELECT t.id FROM traces t
+    WHERE t.started_at < @cutoff
+      AND NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
+      AND EXISTS (
+        SELECT 1 FROM spans s WHERE s.trace_id = t.id
+        AND (s.input_json IS NOT NULL OR s.output_json IS NOT NULL)
+        AND TYPEOF(s.input_json) = 'text'
+      )
+  `).all({ cutoff }) as Array<{ id: string }>;
+
+  const updateSpanStmt = d.prepare(`
+    UPDATE spans SET
+      input_json = @input_json,
+      output_json = @output_json,
+      metadata = COALESCE(metadata || ',\"compressed\":true', '{"compressed":true}')
+    WHERE id = @id
+  `);
+
+  const updateMsgStmt = d.prepare(`
+    UPDATE messages SET content = @content
+    WHERE id = @id AND content IS NOT NULL
+  `);
+
+  const compressAll = d.transaction(() => {
+    for (const trace of traces) {
+      // Compress spans
+      const spans = d.prepare(
+        "SELECT id, input_json, output_json FROM spans WHERE trace_id = @traceId AND (input_json IS NOT NULL OR output_json IS NOT NULL)"
+      ).all({ traceId: trace.id }) as Array<{ id: string; input_json: string | null; output_json: string | null }>;
+
+      for (const span of spans) {
+        const compressedInput = span.input_json ? gzipSync(Buffer.from(span.input_json, "utf-8")).toString("base64") : null;
+        const compressedOutput = span.output_json ? gzipSync(Buffer.from(span.output_json, "utf-8")).toString("base64") : null;
+        updateSpanStmt.run({ id: span.id, input_json: compressedInput, output_json: compressedOutput });
+      }
+
+      // Compress messages
+      const messages = d.prepare(
+        "SELECT id, content FROM messages WHERE trace_id = @traceId AND content IS NOT NULL"
+      ).all({ traceId: trace.id }) as Array<{ id: string; content: string | null }>;
+
+      for (const msg of messages) {
+        if (msg.content) {
+          const compressedContent = gzipSync(Buffer.from(msg.content, "utf-8")).toString("base64");
+          updateMsgStmt.run({ id: msg.id, content: compressedContent });
+        }
+      }
+
+      compressed++;
+    }
+  });
+
+  compressAll();
+  return compressed;
+}
+
+/**
+ * Stage 2: Strip content from traces older than 30 days (warm → cold).
+ * Removes span input/output and message content, keeps metadata only.
+ * Skips annotated traces.
+ */
+export function pruneStage2Strip(): number {
+  const d = getDb();
+  const cutoff = Date.now() - COLD_DAYS * 24 * 60 * 60 * 1000;
+  let stripped = 0;
+
+  // Find unannotated traces older than 30 days that still have content
+  const traces = d.prepare(`
+    SELECT t.id FROM traces t
+    WHERE t.started_at < @cutoff
+      AND NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
+      AND EXISTS (
+        SELECT 1 FROM spans s WHERE s.trace_id = t.id
+        AND (s.input_json IS NOT NULL OR s.output_json IS NOT NULL)
+      )
+  `).all({ cutoff }) as Array<{ id: string }>;
+
+  const stripAll = d.transaction(() => {
+    for (const trace of traces) {
+      d.prepare(
+        "UPDATE spans SET input_json = NULL, output_json = NULL WHERE trace_id = @traceId"
+      ).run({ traceId: trace.id });
+
+      d.prepare(
+        "UPDATE messages SET content = NULL WHERE trace_id = @traceId"
+      ).run({ traceId: trace.id });
+
+      stripped++;
+    }
+  });
+
+  stripAll();
+  return stripped;
+}
+
+/**
+ * Stage 3: Hard-delete unannotated traces older than 90 days (cold → gone).
+ * Removes traces, spans, messages, and eval_results for unannotated traces.
+ * Annotated traces are NEVER deleted.
+ */
+export function pruneStage3Delete(): number {
+  const d = getDb();
+  const cutoff = Date.now() - DELETE_DAYS * 24 * 60 * 60 * 1000;
+
+  // Only delete traces that have NO annotations
+  const traceIds = d.prepare(`
+    SELECT t.id FROM traces t
+    WHERE t.started_at < @cutoff
+      AND NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
+  `).all({ cutoff }) as Array<{ id: string }>;
+
+  if (traceIds.length === 0) return 0;
+
+  const ids = traceIds.map((r) => r.id);
+  let totalDeleted = 0;
+
+  // Process in batches of 100 to avoid huge IN clauses
+  const batchSize = 100;
+  const deleteAll = d.transaction(() => {
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      const placeholders = batch.map(() => "?").join(",");
+      d.prepare(`DELETE FROM eval_results WHERE trace_id IN (${placeholders})`).run(batch);
+      d.prepare(`DELETE FROM messages WHERE trace_id IN (${placeholders})`).run(batch);
+      d.prepare(`DELETE FROM spans WHERE trace_id IN (${placeholders})`).run(batch);
+      const result = d.prepare(`DELETE FROM traces WHERE id IN (${placeholders})`).run(batch);
+      totalDeleted += result.changes;
+    }
+  });
+
+  deleteAll();
+  return totalDeleted;
+}
+
+/**
+ * Legacy prune: simple time-based delete (kept for backward compatibility).
+ * Now delegates to the 3-stage pipeline.
+ */
+export function pruneOldTraces(): number {
+  const stage1 = pruneStage1Compress();
+  const stage2 = pruneStage2Strip();
+  const stage3 = pruneStage3Delete();
+  return stage3; // Return count of hard-deleted traces for backward compat
 }
 
 export function pruneBySize(): number {
@@ -565,13 +950,19 @@ export function pruneBySize(): number {
     }
     if (sizeBytes <= maxMb * 1024 * 1024) break;
 
+    // Only delete unannotated traces when pruning by size
     const oldest = d
-      .prepare("SELECT id FROM traces ORDER BY started_at ASC LIMIT 10")
+      .prepare(`
+        SELECT t.id FROM traces t
+        WHERE NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
+        ORDER BY t.started_at ASC LIMIT 10
+      `)
       .all() as Array<{ id: string }>;
     if (oldest.length === 0) break;
 
     const ids = oldest.map((r) => r.id);
     const placeholders = ids.map(() => "?").join(",");
+    d.prepare(`DELETE FROM eval_results WHERE trace_id IN (${placeholders})`).run(ids);
     d.prepare(`DELETE FROM messages WHERE trace_id IN (${placeholders})`).run(ids);
     d.prepare(`DELETE FROM spans WHERE trace_id IN (${placeholders})`).run(ids);
     const result = d
@@ -587,8 +978,10 @@ export function vacuum(): void {
   getDb().exec("VACUUM");
 }
 
-export function pruneAll(): { deleted: number; dbSizeBytes: number } {
-  const deleted = pruneOldTraces() + pruneBySize();
+export function pruneAll(): { deleted: number; dbSizeBytes: number; compressed: number; stripped: number } {
+  const compressed = pruneStage1Compress();
+  const stripped = pruneStage2Strip();
+  const deleted = pruneStage3Delete() + pruneBySize();
   vacuum();
   const dbPath = getDbPath();
   let dbSizeBytes = 0;
@@ -597,5 +990,5 @@ export function pruneAll(): { deleted: number; dbSizeBytes: number } {
   } catch {
     // ignore
   }
-  return { deleted, dbSizeBytes };
+  return { deleted, dbSizeBytes, compressed, stripped };
 }

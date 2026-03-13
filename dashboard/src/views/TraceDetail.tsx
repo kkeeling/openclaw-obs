@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import Waterfall from "../components/Waterfall";
 import ConversationView from "../components/ConversationView";
 import SubAgentLinks from "../components/SubAgentLinks";
-import { useTraceDetail } from "../hooks/useApi";
+import { useTraceDetail, createAnnotation, type AnnotationRow } from "../hooks/useApi";
 
 function StatusBadge({ status }: { status: string }) {
   const styles =
@@ -34,12 +34,146 @@ function formatTimestamp(ms: number): string {
   return new Date(ms).toLocaleString();
 }
 
+function AnnotatePanel({ traceId, annotations, onAnnotated }: { traceId: string; annotations: AnnotationRow[]; onAnnotated: () => void }) {
+  const [showForm, setShowForm] = useState(false);
+  const [verdict, setVerdict] = useState<string>("pass");
+  const [category, setCategory] = useState("");
+  const [notes, setNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async () => {
+    setSubmitting(true);
+    try {
+      await createAnnotation({
+        trace_id: traceId,
+        annotator_id: "dashboard-user",
+        verdict,
+        failure_category: category || undefined,
+        notes: notes || undefined,
+      });
+      setShowForm(false);
+      setVerdict("pass");
+      setCategory("");
+      setNotes("");
+      onAnnotated();
+    } catch (err) {
+      console.error("Failed to create annotation:", err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const verdictColors: Record<string, string> = {
+    pass: "text-green-600 dark:text-green-400",
+    fail: "text-red-600 dark:text-red-400",
+    flag: "text-yellow-600 dark:text-yellow-400",
+  };
+  const verdictEmoji: Record<string, string> = { pass: "✓", fail: "✗", flag: "★" };
+
+  return (
+    <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold flex items-center gap-2">
+          📝 Annotations
+          {annotations.length > 0 && (
+            <span className="text-xs bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">{annotations.length}</span>
+          )}
+        </h2>
+        {!showForm && (
+          <button
+            onClick={() => setShowForm(true)}
+            className="text-xs px-2 py-1 bg-accent text-white rounded hover:bg-accent/90 transition-colors"
+          >
+            + Annotate
+          </button>
+        )}
+      </div>
+
+      {/* Existing annotations */}
+      {annotations.length > 0 && (
+        <div className="space-y-2 mb-3">
+          {annotations.map((a) => (
+            <div key={a.id} className="text-sm border border-gray-100 dark:border-gray-800 rounded p-2">
+              <div className="flex items-center gap-2">
+                <span className={`font-medium ${verdictColors[a.verdict] || ""}`}>
+                  {verdictEmoji[a.verdict] || "?"} {a.verdict}
+                </span>
+                {a.failure_category && (
+                  <span className="text-xs bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-400 px-1.5 py-0.5 rounded">
+                    {a.failure_category}
+                  </span>
+                )}
+                <span className="text-xs text-gray-400 ml-auto">{a.annotator_id} · {new Date(a.created_at).toLocaleString()}</span>
+              </div>
+              {a.notes && <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">{a.notes}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Annotation form */}
+      {showForm && (
+        <div className="space-y-2 border-t border-gray-100 dark:border-gray-800 pt-3">
+          <div className="flex gap-2">
+            {["pass", "fail", "flag"].map((v) => (
+              <button
+                key={v}
+                onClick={() => setVerdict(v)}
+                className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                  verdict === v
+                    ? v === "pass" ? "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-400"
+                    : v === "fail" ? "bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-400"
+                    : "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-400"
+                    : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
+                }`}
+              >
+                {verdictEmoji[v]} {v}
+              </button>
+            ))}
+          </div>
+          {verdict === "fail" && (
+            <input
+              type="text"
+              placeholder="Failure category (e.g. hallucination, wrong_tool, incomplete)"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent"
+            />
+          )}
+          <textarea
+            placeholder="Notes (optional)"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            rows={2}
+            className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent resize-none"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={handleSubmit}
+              disabled={submitting}
+              className="text-xs px-3 py-1 bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50"
+            >
+              {submitting ? "Saving..." : "Save"}
+            </button>
+            <button
+              onClick={() => setShowForm(false)}
+              className="text-xs px-3 py-1 text-gray-500 hover:text-gray-700"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 type TabId = "conversation" | "timeline";
 
 export default function TraceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: trace, loading } = useTraceDetail(id!);
+  const { data: trace, loading, refresh } = useTraceDetail(id!);
   const [activeTab, setActiveTab] = useState<TabId>("conversation");
 
   if (loading && !trace) {
@@ -146,6 +280,13 @@ export default function TraceDetail() {
           </div>
         </div>
       </div>
+
+      {/* Annotations */}
+      <AnnotatePanel
+        traceId={trace.id}
+        annotations={trace.annotations || []}
+        onAnnotated={refresh}
+      />
 
       {/* Sub-agent links */}
       {(hasParent || hasChildren) && (

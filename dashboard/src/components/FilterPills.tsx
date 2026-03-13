@@ -68,8 +68,31 @@ export default function FilterPills({ filters, onChange }: FilterPillsProps) {
         className="h-8 w-28 px-2 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
       />
 
+      {/* Verdict filter */}
+      <select
+        value={filters.verdict || ""}
+        onChange={(e) => onChange({ ...filters, verdict: e.target.value || undefined })}
+        className="h-8 px-2 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+      >
+        <option value="">All Verdicts</option>
+        <option value="pass">✓ Pass</option>
+        <option value="fail">✗ Fail</option>
+        <option value="flag">★ Flag</option>
+      </select>
+
+      {/* Annotated filter */}
+      <select
+        value={filters.annotated === undefined ? "" : String(filters.annotated)}
+        onChange={(e) => onChange({ ...filters, annotated: e.target.value === "" ? undefined : e.target.value === "true" })}
+        className="h-8 px-2 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+      >
+        <option value="">Annotated?</option>
+        <option value="true">Annotated</option>
+        <option value="false">Not annotated</option>
+      </select>
+
       {/* Clear */}
-      {(filters.status || filters.agent || filters.model || filters.search || filters.minCost) && (
+      {(filters.status || filters.agent || filters.model || filters.search || filters.minCost || filters.verdict || filters.annotated !== undefined) && (
         <button
           onClick={() => onChange({})}
           className="h-8 px-3 rounded bg-gray-200 dark:bg-gray-800 text-sm hover:bg-gray-300 dark:hover:bg-gray-700 transition-colors duration-100"

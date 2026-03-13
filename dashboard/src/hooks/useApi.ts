@@ -7,12 +7,26 @@ export interface TraceRow {
   started_at: number;
   ended_at: number | null;
   status: string;
+  mc_task_id: string | null;
   metadata: string | null;
   // Span aggregates (from list API)
   models: string | null;
   total_tokens_in: number;
   total_tokens_out: number;
   total_cost: number;
+  // Annotation aggregates (from list API)
+  annotation_count: number;
+  latest_verdict: string | null;
+}
+
+export interface AnnotationRow {
+  id: number;
+  trace_id: string;
+  annotator_id: string;
+  verdict: string;
+  failure_category: string | null;
+  notes: string | null;
+  created_at: number;
 }
 
 export interface SpanRow {
@@ -47,6 +61,7 @@ export interface MessageRow {
 export interface TraceDetail extends TraceRow {
   spans: SpanRow[];
   messages: MessageRow[];
+  annotations: AnnotationRow[];
   children: Array<{ id: string; agent_name: string; started_at: number; status: string }>;
   parent_trace_id: string | null;
 }
@@ -90,6 +105,8 @@ export interface TraceFilters {
   until?: number;
   minCost?: number;
   search?: string;
+  verdict?: string;
+  annotated?: boolean;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -139,10 +156,12 @@ export function useTraces(filters: TraceFilters) {
     if (filters.until) params.set("until", String(filters.until));
     if (filters.minCost) params.set("minCost", String(filters.minCost));
     if (filters.search) params.set("search", filters.search);
+    if (filters.verdict) params.set("verdict", filters.verdict);
+    if (filters.annotated !== undefined) params.set("annotated", String(filters.annotated));
     params.set("limit", "500");
     const qs = params.toString();
     return fetchJson<TraceRow[]>(`/api/traces${qs ? `?${qs}` : ""}`);
-  }, [filters.status, filters.agent, filters.model, filters.since, filters.until, filters.minCost, filters.search]);
+  }, [filters.status, filters.agent, filters.model, filters.since, filters.until, filters.minCost, filters.search, filters.verdict, filters.annotated]);
 
   return usePolling(fetcher, 5000);
 }
@@ -170,4 +189,38 @@ export function useHealth() {
 
 export async function prune(): Promise<{ deleted: number; db_size_bytes: number }> {
   return fetchJson("/api/prune", { method: "POST" });
+}
+
+// ---- Annotation API ----
+
+export async function createAnnotation(data: {
+  trace_id: string;
+  annotator_id: string;
+  verdict: string;
+  failure_category?: string;
+  notes?: string;
+}): Promise<AnnotationRow> {
+  return fetchJson("/api/annotations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function bulkAnnotate(annotations: Array<{
+  trace_id: string;
+  annotator_id: string;
+  verdict: string;
+  failure_category?: string;
+  notes?: string;
+}>): Promise<{ created: number; annotations: AnnotationRow[] }> {
+  return fetchJson("/api/annotations/bulk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ annotations }),
+  });
+}
+
+export async function deleteAnnotation(id: number): Promise<void> {
+  await fetch(`/api/annotations/${id}`, { method: "DELETE" });
 }

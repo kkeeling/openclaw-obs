@@ -64,6 +64,22 @@ function formatCostCompact(cost: number): string {
   return `$${cost.toFixed(2)}`;
 }
 
+function VerdictBadge({ verdict, count }: { verdict: string | null; count: number }) {
+  if (!verdict || count === 0) return <span className="text-xs text-gray-400">—</span>;
+  const colors: Record<string, string> = {
+    pass: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+    fail: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+    flag: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+  };
+  const emoji: Record<string, string> = { pass: "✓", fail: "✗", flag: "★" };
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${colors[verdict] || "bg-gray-100 text-gray-600"}`}>
+      {emoji[verdict] || "?"} {verdict}
+      {count > 1 && <span className="text-[10px] opacity-70">×{count}</span>}
+    </span>
+  );
+}
+
 const columns: ColumnDef<TraceRow>[] = [
   {
     id: "status",
@@ -135,6 +151,15 @@ const columns: ColumnDef<TraceRow>[] = [
         </span>
       );
     },
+  },
+  {
+    id: "verdict",
+    header: "Eval",
+    size: 90,
+    accessorFn: (row) => row.latest_verdict || "",
+    cell: ({ row }) => (
+      <VerdictBadge verdict={row.original.latest_verdict} count={row.original.annotation_count || 0} />
+    ),
   },
   {
     id: "duration",
