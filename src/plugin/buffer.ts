@@ -1,7 +1,7 @@
 type FlushCallback = (events: BufferedEvent[]) => void;
 
 export interface BufferedEvent {
-  type: "trace" | "span" | "trace_update" | "span_update" | "message";
+  type: "trace" | "span" | "trace_update" | "span_update" | "message" | "annotation";
   data: Record<string, unknown>;
 }
 
