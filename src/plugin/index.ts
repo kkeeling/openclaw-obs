@@ -601,11 +601,16 @@ export const plugin = {
     try {
       // @ts-expect-error -- openclaw/plugin-sdk only exists at runtime inside OpenClaw
       import("openclaw/plugin-sdk").then((sdk: { onDiagnosticEvent?: (listener: DiagnosticListener) => void }) => {
+        console.log("[openclaw-obs] plugin-sdk loaded, onDiagnosticEvent available:", typeof sdk.onDiagnosticEvent === "function");
         if (typeof sdk.onDiagnosticEvent === "function") {
-          sdk.onDiagnosticEvent(handleDiagnosticEvent);
+          sdk.onDiagnosticEvent((event: Record<string, unknown>) => {
+            console.log("[openclaw-obs] diagnostic event received:", event.type);
+            handleDiagnosticEvent(event);
+          });
+          console.log("[openclaw-obs] diagnostic listener registered");
         }
-      }).catch(() => {
-        console.error("[openclaw-obs] Could not load openclaw/plugin-sdk diagnostic events");
+      }).catch((err: unknown) => {
+        console.error("[openclaw-obs] Could not load openclaw/plugin-sdk:", err);
       });
     } catch {
       // Not in an OpenClaw environment
