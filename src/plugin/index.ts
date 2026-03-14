@@ -26,7 +26,7 @@ interface PluginApi {
 type DiagnosticListener = (event: Record<string, unknown>) => void;
 
 // Track active traces/spans for correlation
-const sessionTraceMap = new Map<string, { traceId: string; lastActivity: number }>(); // sessionKey -> {traceId, lastActivity}
+const sessionTraceMap = new Map<string, { traceId: string; sessionId: string | null; lastActivity: number }>(); // sessionKey -> {traceId, sessionId, lastActivity}
 const toolSpanMap = new Map<string, string>(); // unique callKey -> spanId
 const messageSequence = new Map<string, number>(); // traceId -> next sequence number
 const uuidToSessionKey = new Map<string, string>(); // UUID sessionId -> full sessionKey (for diagnostic event correlation)
@@ -151,17 +151,48 @@ function resolveSessionKey(ctx: Record<string, unknown>, event?: Record<string, 
     || null;
 }
 
+/**
+ * Resolve the ephemeral sessionId (UUID) from context/event.
+ * This is distinct from sessionKey — each forceNew cron fire gets a unique
+ * sessionId while sharing the same sessionKey pattern.
+ */
+function resolveSessionId(ctx: Record<string, unknown>, event?: Record<string, unknown>): string | null {
+  return (ctx.sessionId as string)
+    || (event?.sessionId as string)
+    || null;
+}
+
 function getOrCreateTrace(
   sessionKey: string,
   agentName?: string,
+  sessionId?: string | null,
 ): string {
   const entry = sessionTraceMap.get(sessionKey);
   if (entry) {
-    entry.lastActivity = Date.now();
-    return entry.traceId;
+    // If a new sessionId arrives for the same sessionKey, the previous session
+    // has ended (e.g. a new cron fire with forceNew).  Close the old trace and
+    // fall through to create a fresh one.
+    const sessionChanged = sessionId && entry.sessionId && sessionId !== entry.sessionId;
+    if (!sessionChanged) {
+      entry.lastActivity = Date.now();
+      return entry.traceId;
+    }
+    // Close the previous trace before starting a new one
+    buffer.push({
+      type: "trace_update",
+      data: {
+        id: entry.traceId,
+        updates: {
+          ended_at: Date.now(),
+          status: "success",
+        },
+      },
+    });
+    sessionTraceMap.delete(sessionKey);
+    messageSequence.delete(entry.traceId);
   }
   const traceId = randomUUID();
-  sessionTraceMap.set(sessionKey, { traceId, lastActivity: Date.now() });
+  sessionTraceMap.set(sessionKey, { traceId, sessionId: sessionId ?? null, lastActivity: Date.now() });
   registerSessionKeyMapping(sessionKey);
 
   // Try to infer agent name from session key if not provided
@@ -192,7 +223,8 @@ function registerHooks(api: PluginApi): void {
     const sessionKey = resolveSessionKey(c, e);
     if (!sessionKey) return;
     const agentName = resolveAgentName(c);
-    getOrCreateTrace(sessionKey, agentName);
+    const sessionId = resolveSessionId(c, e);
+    getOrCreateTrace(sessionKey, agentName, sessionId);
   });
 
   api.on("session_end", (event: unknown, ctx: unknown) => {
@@ -218,11 +250,13 @@ function registerHooks(api: PluginApi): void {
   });
 
   api.on("before_agent_start", (event: unknown, ctx: unknown) => {
+    const e = event as Record<string, unknown>;
     const c = ctx as Record<string, unknown>;
-    const sessionKey = resolveSessionKey(c);
+    const sessionKey = resolveSessionKey(c, e);
     if (!sessionKey) return;
     const agentName = resolveAgentName(c);
-    getOrCreateTrace(sessionKey, agentName);
+    const sessionId = resolveSessionId(c, e);
+    getOrCreateTrace(sessionKey, agentName, sessionId);
   });
 
   api.on("agent_end", (event: unknown, ctx: unknown) => {
@@ -476,7 +510,7 @@ function registerHooks(api: PluginApi): void {
 
     // Create the child trace with parent reference
     const childTraceId = randomUUID();
-    sessionTraceMap.set(childSessionKey, { traceId: childTraceId, lastActivity: Date.now() });
+    sessionTraceMap.set(childSessionKey, { traceId: childTraceId, sessionId: childSessionKey, lastActivity: Date.now() });
 
     buffer.push({
       type: "trace",
