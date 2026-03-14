@@ -4,3 +4,7 @@ dist/
 *.db-wal
 *.db-shm
 dashboard/node_modules/
+dashboard/dist/
+*.log
+.env
+.DS_Store
