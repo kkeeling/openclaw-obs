@@ -11,6 +11,7 @@ import {
   closeDb,
 } from "./db.js";
 import { EventBuffer, type BufferedEvent } from "./buffer.js";
+import { estimateCost } from "./pricing.js";
 
 // Type stubs for the OpenClaw plugin SDK (avoid hard dependency)
 interface PluginApi {
@@ -343,7 +344,13 @@ function registerHooks(api: PluginApi): void {
           output_json: null,
           tokens_in: usage.input ?? usage.promptTokens ?? null,
           tokens_out: usage.output ?? null,
-          cost_usd: null, // Cost not available here; added by handleDiagnosticEvent if diagnostics enabled
+          cost_usd: estimateCost({
+            model: (e.model as string) ?? null,
+            tokensIn: usage.input ?? usage.promptTokens ?? null,
+            tokensOut: usage.output ?? null,
+            cacheRead: usage.cacheRead ?? null,
+            cacheWrite: usage.cacheWrite ?? null,
+          }), // Estimate from pricing table; may be overwritten by diagnostic event if available
           model: (e.model as string) ?? null,
           error: null,
           metadata: safeStringify({
@@ -536,7 +543,14 @@ function handleDiagnosticEvent(event: Record<string, unknown>): void {
   if (recentHookTs && Date.now() - recentHookTs < 10_000) {
     recentLlmSpanTraces.delete(traceId);
     // Merge cost into the existing span created by llm_output hook
-    const costUsd = (event.costUsd as number) ?? null;
+    // Prefer upstream costUsd; fall back to our pricing table estimate
+    const costUsd = (event.costUsd as number) ?? estimateCost({
+      model: (event.model as string) ?? null,
+      tokensIn: usage?.input ?? usage?.promptTokens ?? null,
+      tokensOut: usage?.output ?? null,
+      cacheRead: usage?.cacheRead ?? null,
+      cacheWrite: usage?.cacheWrite ?? null,
+    });
     if (costUsd != null) {
       try {
         updateLatestLlmSpanCost(traceId, costUsd);
@@ -563,7 +577,13 @@ function handleDiagnosticEvent(event: Record<string, unknown>): void {
       output_json: null,
       tokens_in: usage?.input ?? usage?.promptTokens ?? null,
       tokens_out: usage?.output ?? null,
-      cost_usd: (event.costUsd as number) ?? null,
+      cost_usd: (event.costUsd as number) ?? estimateCost({
+        model: (event.model as string) ?? null,
+        tokensIn: usage?.input ?? usage?.promptTokens ?? null,
+        tokensOut: usage?.output ?? null,
+        cacheRead: usage?.cacheRead ?? null,
+        cacheWrite: usage?.cacheWrite ?? null,
+      }),
       model: (event.model as string) ?? null,
       error: null,
       metadata: safeStringify({

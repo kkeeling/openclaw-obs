@@ -92,11 +92,11 @@ const columns: ColumnDef<TraceRow>[] = [
   {
     id: "session_id",
     header: "Session ID",
-    size: 150,
+    size: 320,
     accessorFn: (row) => row.session_id,
     cell: ({ row }) => (
-      <span className="font-mono text-xs truncate block max-w-[140px]" title={row.original.session_id}>
-        {row.original.session_id.slice(0, 12)}...
+      <span className="font-mono text-xs truncate block max-w-[300px]" title={row.original.session_id}>
+        {row.original.session_id}
       </span>
     ),
   },
