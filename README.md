@@ -4,6 +4,17 @@ Local-first observability for [OpenClaw](https://github.com/openclaw/openclaw) A
 
 **Zero data leaves your machine.** Everything is stored in a local SQLite database.
 
+### Cost & token analytics at a glance
+![Overview dashboard showing cost trends, token usage, per-agent breakdown, and model costs](docs/screenshots/overview.jpg)
+
+### Every session, filterable and searchable
+![Trace list showing sessions with agent, model, tokens, cost, and duration](docs/screenshots/trace-list.jpg)
+
+### Full conversation replay with tool calls
+![Trace detail showing session metadata and conversation browser](docs/screenshots/trace-detail.jpg)
+
+---
+
 ## Why You Need This
 
 Running AI agents without observability is like driving with your eyes closed. You'll hit something expensive.
