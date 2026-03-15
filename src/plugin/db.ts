@@ -466,7 +466,8 @@ export function listTraces(params: TraceListParams): TraceRow[] {
         (SELECT COALESCE(SUM(s.tokens_out), 0) FROM spans s WHERE s.trace_id = t.id) AS total_tokens_out,
         (SELECT COALESCE(SUM(s.cost_usd), 0) FROM spans s WHERE s.trace_id = t.id) AS total_cost,
         (SELECT COUNT(*) FROM annotations a WHERE a.trace_id = t.id) AS annotation_count,
-        (SELECT a.verdict FROM annotations a WHERE a.trace_id = t.id ORDER BY a.created_at DESC LIMIT 1) AS latest_verdict
+        (SELECT a.verdict FROM annotations a WHERE a.trace_id = t.id ORDER BY a.created_at DESC LIMIT 1) AS latest_verdict,
+        (SELECT MAX(m.timestamp) FROM messages m WHERE m.trace_id = t.id) AS last_activity
       FROM traces t ${where} ORDER BY t.started_at DESC LIMIT @limit OFFSET @offset`,
     )
     .all({ ...values, limit, offset }) as TraceRow[];
