@@ -17,6 +17,8 @@ export interface TraceRow {
   // Annotation aggregates (from list API)
   annotation_count: number;
   latest_verdict: string | null;
+  // Last message timestamp (from list API)
+  last_activity: number | null;
 }
 
 export interface AnnotationRow {

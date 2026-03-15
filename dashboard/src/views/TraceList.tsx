@@ -173,6 +173,17 @@ const columns: ColumnDef<TraceRow>[] = [
     ),
   },
   {
+    id: "last_activity",
+    header: "Last Activity",
+    size: 110,
+    accessorFn: (row) => row.last_activity ?? 0,
+    cell: ({ row }) => {
+      const ts = row.original.last_activity;
+      if (!ts) return <span className="text-xs text-gray-400">—</span>;
+      return <span className="text-xs text-gray-500">{timeAgo(ts)}</span>;
+    },
+  },
+  {
     id: "started_at",
     header: "Started",
     size: 100,
@@ -188,7 +199,7 @@ const ROW_HEIGHT = 40;
 export default function TraceList() {
   const [filters, setFilters] = useState<TraceFilters>({});
   const [sorting, setSorting] = useState<SortingState>([
-    { id: "started_at", desc: true },
+    { id: "last_activity", desc: true },
   ]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const navigate = useNavigate();
