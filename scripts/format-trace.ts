@@ -26,6 +26,7 @@ const DB_PATH =
 
 const SYSTEM_PROMPT_MAX_CHARS = 2000;
 const MESSAGE_CONTENT_MAX_CHARS = 4000;
+const TOTAL_MARKDOWN_MAX_CHARS = 300000; // ~75k tokens — leaves room for rubric + response
 
 interface TraceRow {
   id: string;
@@ -238,8 +239,14 @@ export function formatTrace(traceId: string, db?: Database.Database): FormattedT
       lines.push("");
     }
 
-    // Conversation
+    // Conversation (budget-aware)
     lines.push("## Conversation");
+    let charBudget = TOTAL_MARKDOWN_MAX_CHARS;
+    // Reserve space for metadata, tool summary, and sections already added
+    const headerChars = lines.join("\n").length;
+    charBudget -= headerChars + 2000; // 2k buffer for tool summary footer
+
+    let truncatedMsgCount = 0;
     for (const msg of messages) {
       if (msg.role === "system") continue; // already shown above
       const content = decompressContent(msg.content) || "";
@@ -249,8 +256,18 @@ export function formatTrace(traceId: string, db?: Database.Database): FormattedT
         ? `**tool_result** (${msg.tool_name || "unknown"})`
         : `**${msg.role}**`;
 
+      const entry = `### ${label}\n${truncate(content, MESSAGE_CONTENT_MAX_CHARS)}\n`;
+      if (charBudget - entry.length < 0) {
+        truncatedMsgCount++;
+        continue;
+      }
+      charBudget -= entry.length;
       lines.push(`### ${label}`);
       lines.push(truncate(content, MESSAGE_CONTENT_MAX_CHARS));
+      lines.push("");
+    }
+    if (truncatedMsgCount > 0) {
+      lines.push(`> [${truncatedMsgCount} messages omitted — trace exceeded budget]`);
       lines.push("");
     }
 

@@ -67,30 +67,7 @@ function loadRubric(): string {
   return fs.readFileSync(rubricPath, "utf-8");
 }
 
-async function evaluateTrace(
-  client: Anthropic,
-  model: string,
-  rubric: string,
-  traceMarkdown: string,
-): Promise<EvalResult> {
-  const response = await client.messages.create({
-    model,
-    max_tokens: 1024,
-    system: rubric,
-    messages: [
-      {
-        role: "user",
-        content: `Evaluate this trace:\n\n${traceMarkdown}`,
-      },
-    ],
-  });
-
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("");
-
-  // Parse JSON from response — handle markdown fences and surrounding prose
+function parseEvalResponse(text: string): EvalResult {
   let jsonStr = text.trim();
   // Strip markdown fences
   jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?\s*```\s*$/, "").trim();
@@ -98,28 +75,66 @@ async function evaluateTrace(
   const jsonMatch = jsonStr.match(/\{[\s\S]*"verdict"[\s\S]*\}/);
   if (jsonMatch) jsonStr = jsonMatch[0];
 
-  try {
-    const parsed = JSON.parse(jsonStr) as EvalResult;
-
-    // Validate verdict
-    if (!["pass", "fail", "flag"].includes(parsed.verdict)) {
-      throw new Error(`Invalid verdict: ${parsed.verdict}`);
-    }
-
-    return {
-      verdict: parsed.verdict,
-      notes: parsed.notes || "",
-      failure_category: parsed.failure_category || null,
-    };
-  } catch (err) {
-    // If JSON parse fails, extract what we can
-    console.warn(`[annotate] Failed to parse eval response, marking as flag. Raw: ${text.slice(0, 200)}`);
-    return {
-      verdict: "flag",
-      notes: `[parse_error] Could not parse evaluator response.\nRaw output: ${text.slice(0, 500)}`,
-      failure_category: null,
-    };
+  const parsed = JSON.parse(jsonStr) as EvalResult;
+  if (!["pass", "fail", "flag"].includes(parsed.verdict)) {
+    throw new Error(`Invalid verdict: ${parsed.verdict}`);
   }
+  return {
+    verdict: parsed.verdict,
+    notes: parsed.notes || "",
+    failure_category: parsed.failure_category || null,
+  };
+}
+
+async function evaluateTrace(
+  client: Anthropic,
+  model: string,
+  rubric: string,
+  traceMarkdown: string,
+): Promise<EvalResult> {
+  const MAX_RETRIES = 2; // initial + 1 retry
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: `Evaluate this trace:\n\n${traceMarkdown}` },
+  ];
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 1024,
+      system: rubric,
+      messages,
+    });
+
+    const text = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    try {
+      return parseEvalResponse(text);
+    } catch (err) {
+      if (attempt < MAX_RETRIES - 1) {
+        // Retry: append the bad response + correction nudge
+        console.warn(`[annotate] Parse failed (attempt ${attempt + 1}), retrying with nudge...`);
+        messages.push(
+          { role: "assistant", content: text },
+          { role: "user", content: "Your response was not valid JSON. Respond with ONLY a JSON object: {\"verdict\": \"pass|fail|flag\", \"notes\": \"...\", \"failure_category\": null}. No other text." },
+        );
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      // Final attempt failed
+      console.warn(`[annotate] Failed to parse after ${MAX_RETRIES} attempts. Raw: ${text.slice(0, 200)}`);
+      return {
+        verdict: "flag",
+        notes: `[parse_error] Could not parse evaluator response after ${MAX_RETRIES} attempts.\nRaw output: ${text.slice(0, 500)}`,
+        failure_category: null,
+      };
+    }
+  }
+
+  // Unreachable, but TypeScript needs it
+  throw new Error("Unreachable");
 }
 
 async function writeAnnotation(
