@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  getDb,
   upsertTrace,
   insertSpan,
   updateSpan,
@@ -91,34 +92,57 @@ function evictStaleSessions(): void {
 }
 
 function flushBatch(events: BufferedEvent[]): void {
-  for (const event of events) {
-    try {
-      switch (event.type) {
-        case "trace":
-          upsertTrace(event.data as Parameters<typeof upsertTrace>[0]);
-          break;
-        case "span":
-          insertSpan(event.data as Parameters<typeof insertSpan>[0]);
-          break;
-        case "trace_update":
-          updateTrace(
-            event.data.id as string,
-            event.data.updates as Parameters<typeof updateTrace>[1],
-          );
-          break;
-        case "span_update":
-          updateSpan(
-            event.data.id as string,
-            event.data.updates as Parameters<typeof updateSpan>[1],
-          );
-          break;
-        case "message":
-          insertMessage(event.data as unknown as Parameters<typeof insertMessage>[0]);
-          break;
+  const start = performance.now();
+  let errorCount = 0;
+  let firstError: unknown = null;
+
+  // Wrap entire batch in a single transaction to reduce fsync cost from O(n) to O(1)
+  const db = getDb();
+  db.transaction(() => {
+    for (const event of events) {
+      try {
+        switch (event.type) {
+          case "trace":
+            upsertTrace(event.data as Parameters<typeof upsertTrace>[0]);
+            break;
+          case "span":
+            insertSpan(event.data as Parameters<typeof insertSpan>[0]);
+            break;
+          case "trace_update":
+            updateTrace(
+              event.data.id as string,
+              event.data.updates as Parameters<typeof updateTrace>[1],
+            );
+            break;
+          case "span_update":
+            updateSpan(
+              event.data.id as string,
+              event.data.updates as Parameters<typeof updateSpan>[1],
+            );
+            break;
+          case "message":
+            insertMessage(event.data as unknown as Parameters<typeof insertMessage>[0]);
+            break;
+        }
+      } catch (err) {
+        errorCount++;
+        if (!firstError) firstError = err;
       }
-    } catch (err) {
-      console.error("[openclaw-obs] Write error:", err);
     }
+  })();
+
+  const ms = performance.now() - start;
+
+  // Rate-limited error logging: one summary + first error detail per flush
+  if (errorCount > 0) {
+    console.error(`[openclaw-obs] flush: ${errorCount} write error(s), first:`, firstError);
+  }
+
+  // Timing instrumentation — warn for large batches or slow flushes
+  if (events.length > 100 || ms > 50) {
+    console.warn(`[openclaw-obs] flush: ${events.length} events, ${ms.toFixed(1)}ms, ${errorCount} errors`);
+  } else {
+    console.log(`[openclaw-obs] flush: ${events.length} events, ${ms.toFixed(1)}ms, ${errorCount} errors`);
   }
 }
 

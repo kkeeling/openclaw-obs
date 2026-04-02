@@ -319,7 +319,7 @@ export function getMessages(traceId: string): MessageRow[] {
 export function insertSpan(span: Omit<SpanRow, "input_json" | "output_json"> & { input_json?: string | null; output_json?: string | null }): void {
   const d = getDb();
   const stmt = d.prepare(`
-    INSERT INTO spans (id, trace_id, parent_span_id, kind, name, started_at, ended_at,
+    INSERT OR IGNORE INTO spans (id, trace_id, parent_span_id, kind, name, started_at, ended_at,
       input_json, output_json, tokens_in, tokens_out, cost_usd, model, error, metadata)
     VALUES (@id, @trace_id, @parent_span_id, @kind, @name, @started_at, @ended_at,
       @input_json, @output_json, @tokens_in, @tokens_out, @cost_usd, @model, @error, @metadata)
