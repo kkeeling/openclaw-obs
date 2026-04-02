@@ -12,6 +12,7 @@ export class EventBuffer {
   private queue: BufferedEvent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private flushFn: FlushCallback;
+  private pendingFlush = false;
 
   constructor(flushFn: FlushCallback) {
     this.flushFn = flushFn;
@@ -36,8 +37,13 @@ export class EventBuffer {
 
   push(event: BufferedEvent): void {
     this.queue.push(event);
-    if (this.queue.length >= FLUSH_THRESHOLD) {
-      this.flush();
+    // Defer threshold-triggered flush to yield to pending I/O (HTTP, WebSocket)
+    if (this.queue.length >= FLUSH_THRESHOLD && !this.pendingFlush) {
+      this.pendingFlush = true;
+      setImmediate(() => {
+        this.pendingFlush = false;
+        this.flush();
+      });
     }
   }
 
