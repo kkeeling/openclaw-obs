@@ -912,8 +912,8 @@ export function pruneBySize(): number {
     // so 50000 pages ≈ 200MB reclaimed per iteration.
     try {
       d.pragma("incremental_vacuum(50000)");
-    } catch {
-      // ignore — vacuum failure shouldn't break the prune loop
+    } catch (err) {
+      console.warn("[openclaw-obs] incremental_vacuum failed during pruneBySize, space may not be reclaimed:", err);
     }
   }
 
