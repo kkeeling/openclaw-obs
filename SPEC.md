@@ -100,11 +100,13 @@ CREATE INDEX idx_traces_session ON traces(session_id);
 
 ### Data Retention
 
-- Default: 7 days. Configurable via `OPENCLAW_OBS_RETENTION_DAYS`
-- Prune on startup + hourly during runtime
-- Cascade: delete spans for expired traces, then delete traces
-- VACUUM only on explicit user command (manual prune button in dashboard)
-- Optional max DB size: `OPENCLAW_OBS_MAX_DB_MB` — prunes oldest traces until under limit
+- 2-stage pipeline: strip content at `OPENCLAW_OBS_RETENTION_DAYS` (default 7), hard-delete at 4x retention days (default 28)
+- Message content follows the same payload cap as spans (`OPENCLAW_OBS_MAX_PAYLOAD_KB`, default 10KB)
+- Prune on startup (deferred 2s to avoid blocking gateway) + hourly during runtime
+- Incremental auto-vacuum reclaims space after each prune cycle
+- Full VACUUM on explicit user command (manual prune button in dashboard)
+- Max DB size: `OPENCLAW_OBS_MAX_DB_MB` (default 2048MB / 2GB) — prunes oldest unannotated traces until under limit. Set to 0 to disable.
+- Annotated traces are NEVER pruned, stripped, or deleted regardless of age or DB size
 
 ---
 
@@ -320,9 +322,9 @@ These are all Phase Never unless a real user asks for them.
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `OPENCLAW_OBS_DB_PATH` | `~/.openclaw/observability/traces.db` | SQLite database location |
-| `OPENCLAW_OBS_RETENTION_DAYS` | `7` | Auto-prune traces older than N days |
-| `OPENCLAW_OBS_MAX_DB_MB` | (unlimited) | Max DB size; prunes oldest when exceeded |
-| `OPENCLAW_OBS_MAX_PAYLOAD_KB` | `10` | Max size for input/output JSON per span (0 = unlimited) |
+| `OPENCLAW_OBS_RETENTION_DAYS` | `7` | Content stripped after N days, hard-deleted after 4×N days |
+| `OPENCLAW_OBS_MAX_DB_MB` | `2048` | Max DB size in MB (2GB default); prunes oldest unannotated traces when exceeded. Set to 0 to disable. |
+| `OPENCLAW_OBS_MAX_PAYLOAD_KB` | `10` | Max size for span input/output JSON and message content (0 = unlimited) |
 | `OPENCLAW_OBS_COST_ALERT_USD` | `5` | Cost threshold for ⚠️ indicator on trace list |
 | `OPENCLAW_OBS_PORT` | `19100` | Dashboard port (falls back to 19101-19109) |
 | `OPENCLAW_OBS_POLL_TRACES_MS` | `5000` | Trace list poll interval |

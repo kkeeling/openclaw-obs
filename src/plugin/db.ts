@@ -197,7 +197,8 @@ function getMaxPayloadBytes(): number {
 }
 
 function getRetentionDays(): number {
-  return parseInt(process.env.OPENCLAW_OBS_RETENTION_DAYS || "7", 10);
+  const days = parseInt(process.env.OPENCLAW_OBS_RETENTION_DAYS || "7", 10);
+  return days > 0 ? days : 7;
 }
 
 export function truncatePayload(
@@ -284,16 +285,6 @@ export function upsertTrace(trace: Omit<TraceRow, "metadata" | "parent_trace_id"
   });
 }
 
-const MAX_MESSAGE_CONTENT_BYTES = 100 * 1024; // 100KB
-
-function truncateMessageContent(content: string | null | undefined): string | null {
-  if (content == null) return null;
-  if (Buffer.byteLength(content, "utf-8") > MAX_MESSAGE_CONTENT_BYTES) {
-    const buf = Buffer.from(content, "utf-8");
-    return buf.subarray(0, MAX_MESSAGE_CONTENT_BYTES).toString("utf-8") + "\n[truncated]";
-  }
-  return content;
-}
 
 export function insertMessage(msg: MessageRow): void {
   const d = getDb();
@@ -303,7 +294,7 @@ export function insertMessage(msg: MessageRow): void {
   `);
   stmt.run({
     ...msg,
-    content: truncateMessageContent(msg.content),
+    content: truncatePayload(msg.content),
     tool_name: msg.tool_name ?? null,
     metadata: msg.metadata ?? null,
   });
@@ -759,109 +750,42 @@ export function traceHasAnnotations(traceId: string): boolean {
   return !!row;
 }
 
-// ---- Retention / Pruning (3-Stage Pipeline) ----
+// ---- Retention / Pruning (2-Stage Pipeline) ----
 
 /**
- * 3-stage tiered retention pipeline:
- * 1. After 7 days: compress content to gzip (hot → warm)
- * 2. After 30 days: strip content, keep metadata only (warm → cold)
- * 3. After 90 days: hard-delete unannotated traces (cold → gone)
+ * 2-stage tiered retention pipeline:
+ * 1. After retention_days (default 7): strip content, keep metadata only (hot → cold)
+ * 2. After retention_days * 4 (default 28): hard-delete unannotated traces (cold → gone)
  *
  * HARD RULE: Annotated traces are NEVER pruned. They are golden data.
  */
 
-import { gzipSync } from "node:zlib";
-
-const WARM_DAYS = 7;
-const COLD_DAYS = 30;
-const DELETE_DAYS = 90;
-
 /**
- * Stage 1: Compress content for traces older than 7 days (hot → warm).
- * Gzip-compresses span input_json/output_json and message content to BLOB.
- * Skips annotated traces.
- */
-export function pruneStage1Compress(): number {
-  const d = getDb();
-  const cutoff = Date.now() - WARM_DAYS * 24 * 60 * 60 * 1000;
-  let compressed = 0;
-
-  // Find unannotated traces older than 7 days with uncompressed content
-  const traces = d.prepare(`
-    SELECT t.id FROM traces t
-    WHERE t.started_at < @cutoff
-      AND NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
-      AND EXISTS (
-        SELECT 1 FROM spans s WHERE s.trace_id = t.id
-        AND (s.input_json IS NOT NULL OR s.output_json IS NOT NULL)
-        AND TYPEOF(s.input_json) = 'text'
-      )
-  `).all({ cutoff }) as Array<{ id: string }>;
-
-  const updateSpanStmt = d.prepare(`
-    UPDATE spans SET
-      input_json = @input_json,
-      output_json = @output_json,
-      metadata = COALESCE(metadata || ',\"compressed\":true', '{"compressed":true}')
-    WHERE id = @id
-  `);
-
-  const updateMsgStmt = d.prepare(`
-    UPDATE messages SET content = @content
-    WHERE id = @id AND content IS NOT NULL
-  `);
-
-  const compressAll = d.transaction(() => {
-    for (const trace of traces) {
-      // Compress spans
-      const spans = d.prepare(
-        "SELECT id, input_json, output_json FROM spans WHERE trace_id = @traceId AND (input_json IS NOT NULL OR output_json IS NOT NULL)"
-      ).all({ traceId: trace.id }) as Array<{ id: string; input_json: string | null; output_json: string | null }>;
-
-      for (const span of spans) {
-        const compressedInput = span.input_json ? gzipSync(Buffer.from(span.input_json, "utf-8")).toString("base64") : null;
-        const compressedOutput = span.output_json ? gzipSync(Buffer.from(span.output_json, "utf-8")).toString("base64") : null;
-        updateSpanStmt.run({ id: span.id, input_json: compressedInput, output_json: compressedOutput });
-      }
-
-      // Compress messages
-      const messages = d.prepare(
-        "SELECT id, content FROM messages WHERE trace_id = @traceId AND content IS NOT NULL"
-      ).all({ traceId: trace.id }) as Array<{ id: string; content: string | null }>;
-
-      for (const msg of messages) {
-        if (msg.content) {
-          const compressedContent = gzipSync(Buffer.from(msg.content, "utf-8")).toString("base64");
-          updateMsgStmt.run({ id: msg.id, content: compressedContent });
-        }
-      }
-
-      compressed++;
-    }
-  });
-
-  compressAll();
-  return compressed;
-}
-
-/**
- * Stage 2: Strip content from traces older than 30 days (warm → cold).
+ * Stage 1: Strip content from traces older than retention_days (hot → cold).
  * Removes span input/output and message content, keeps metadata only.
  * Skips annotated traces.
  */
-export function pruneStage2Strip(): number {
+export function pruneStripContent(): number {
   const d = getDb();
-  const cutoff = Date.now() - COLD_DAYS * 24 * 60 * 60 * 1000;
+  const retentionDays = getRetentionDays();
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   let stripped = 0;
 
-  // Find unannotated traces older than 30 days that still have content
+  // Find unannotated traces older than retention_days that still have content
+  // (either in spans or messages)
   const traces = d.prepare(`
     SELECT t.id FROM traces t
     WHERE t.started_at < @cutoff
       AND NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
-      AND EXISTS (
-        SELECT 1 FROM spans s WHERE s.trace_id = t.id
-        AND (s.input_json IS NOT NULL OR s.output_json IS NOT NULL)
+      AND (
+        EXISTS (
+          SELECT 1 FROM spans s WHERE s.trace_id = t.id
+          AND (s.input_json IS NOT NULL OR s.output_json IS NOT NULL)
+        )
+        OR EXISTS (
+          SELECT 1 FROM messages m WHERE m.trace_id = t.id
+          AND m.content IS NOT NULL
+        )
       )
   `).all({ cutoff }) as Array<{ id: string }>;
 
@@ -884,13 +808,14 @@ export function pruneStage2Strip(): number {
 }
 
 /**
- * Stage 3: Hard-delete unannotated traces older than 90 days (cold → gone).
+ * Hard-delete unannotated traces older than retention_days * 4 (cold → gone).
  * Removes traces, spans, messages, and eval_results for unannotated traces.
  * Annotated traces are NEVER deleted.
  */
-export function pruneStage3Delete(): number {
+export function pruneHardDelete(): number {
   const d = getDb();
-  const cutoff = Date.now() - DELETE_DAYS * 24 * 60 * 60 * 1000;
+  const retentionDays = getRetentionDays();
+  const cutoff = Date.now() - retentionDays * 4 * 24 * 60 * 60 * 1000;
 
   // Only delete traces that have NO annotations
   const traceIds = d.prepare(`
@@ -923,18 +848,29 @@ export function pruneStage3Delete(): number {
 }
 
 /**
- * Legacy prune: simple time-based delete (kept for backward compatibility).
- * Now delegates to the 3-stage pipeline.
+ * Run the 2-stage retention pipeline: strip content, then hard-delete old traces.
+ * Returns count of hard-deleted traces.
  */
 export function pruneOldTraces(): number {
-  const stage1 = pruneStage1Compress();
-  const stage2 = pruneStage2Strip();
-  const stage3 = pruneStage3Delete();
-  return stage3; // Return count of hard-deleted traces for backward compat
+  const stripped = pruneStripContent();
+  const deleted = pruneHardDelete();
+  if (stripped > 0 || deleted > 0) {
+    console.log(`[openclaw-obs] prune: stripped ${stripped} traces, deleted ${deleted} traces`);
+    // Reclaim freed pages after time-based pruning.
+    // 50000 pages ≈ 200MB — enough for a single prune cycle's delta.
+    // The initial backlog from upgrade is handled by ensureIncrementalAutoVacuum's full VACUUM.
+    try {
+      getDb().pragma("incremental_vacuum(50000)");
+    } catch (err) {
+      console.error("[openclaw-obs] incremental_vacuum failed:", err);
+    }
+  }
+  return deleted;
 }
 
 export function pruneBySize(): number {
-  const maxMb = parseInt(process.env.OPENCLAW_OBS_MAX_DB_MB || "0", 10);
+  // Default 2GB cap. Set OPENCLAW_OBS_MAX_DB_MB=0 to disable size-based pruning.
+  const maxMb = parseInt(process.env.OPENCLAW_OBS_MAX_DB_MB || "2048", 10);
   if (!maxMb) return 0;
 
   const dbPath = getDbPath();
@@ -956,7 +892,7 @@ export function pruneBySize(): number {
       .prepare(`
         SELECT t.id FROM traces t
         WHERE NOT EXISTS (SELECT 1 FROM annotations a WHERE a.trace_id = t.id)
-        ORDER BY t.started_at ASC LIMIT 10
+        ORDER BY t.started_at ASC LIMIT 100
       `)
       .all() as Array<{ id: string }>;
     if (oldest.length === 0) break;
@@ -970,19 +906,48 @@ export function pruneBySize(): number {
       .prepare(`DELETE FROM traces WHERE id IN (${placeholders})`)
       .run(ids);
     totalDeleted += result.changes;
+
+    // Reclaim freed pages so fs.statSync reflects actual size decrease.
+    // Use a large page count to keep up with deletions — each page is 4KB,
+    // so 50000 pages ≈ 200MB reclaimed per iteration.
+    try {
+      d.pragma("incremental_vacuum(50000)");
+    } catch (err) {
+      console.warn("[openclaw-obs] incremental_vacuum failed during pruneBySize, space may not be reclaimed:", err);
+    }
   }
 
+  if (totalDeleted > 0) {
+    console.log(`[openclaw-obs] pruneBySize: deleted ${totalDeleted} traces to stay under ${maxMb}MB cap`);
+  }
   return totalDeleted;
+}
+
+/**
+ * Ensure the DB uses incremental auto_vacuum mode.
+ * If switching from none/full, a one-time full VACUUM is required to restructure the file.
+ * Without this, PRAGMA incremental_vacuum calls are no-ops.
+ */
+export function ensureIncrementalAutoVacuum(): void {
+  const d = getDb();
+  const result = d.pragma("auto_vacuum") as Array<{ auto_vacuum: number }>;
+  const current = result[0]?.auto_vacuum ?? 0;
+  if (current === 2) return; // Already incremental
+
+  console.warn("[openclaw-obs] One-time VACUUM to enable incremental auto-vacuum (may take a few minutes for large DBs)");
+  d.pragma("auto_vacuum = incremental");
+  d.exec("VACUUM");
+  console.log("[openclaw-obs] Incremental auto-vacuum enabled");
 }
 
 export function vacuum(): void {
   getDb().exec("VACUUM");
 }
 
-export function pruneAll(): { deleted: number; dbSizeBytes: number; compressed: number; stripped: number } {
-  const compressed = pruneStage1Compress();
-  const stripped = pruneStage2Strip();
-  const deleted = pruneStage3Delete() + pruneBySize();
+export function pruneAll(): { deleted: number; dbSizeBytes: number; stripped: number } {
+  const stripped = pruneStripContent();
+  const deleted = pruneHardDelete() + pruneBySize();
+  // Full VACUUM for manual prune — maximum space reclamation
   vacuum();
   const dbPath = getDbPath();
   let dbSizeBytes = 0;
@@ -991,5 +956,5 @@ export function pruneAll(): { deleted: number; dbSizeBytes: number; compressed: 
   } catch {
     // ignore
   }
-  return { deleted, dbSizeBytes, compressed, stripped };
+  return { deleted, dbSizeBytes, stripped };
 }
