@@ -10,11 +10,13 @@ Full spec at `SPEC.md` in this directory. Read it first.
 - **Two tables only**: `traces` and `spans` in SQLite
 - **WAL mode** + busy_timeout=5000ms
 - **better-sqlite3** (synchronous, no async overhead)
-- **10KB payload cap** on input_json/output_json at write time (configurable)
+- **10KB payload cap** on input_json/output_json and message content at write time (configurable via `OPENCLAW_OBS_MAX_PAYLOAD_KB`)
 - **Buffer + batch flush**: every 100ms or 50 events
 - **Express + static SPA**: single process serves API + React frontend
 - **Port**: localhost:19100 (fallback 19101-19109)
-- **7-day retention** default, configurable
+- **7-day retention** default, configurable; 2-stage pipeline (strip at retention_days, delete at 4x)
+- **2GB default DB size cap** (`OPENCLAW_OBS_MAX_DB_MB=2048`), set to 0 to disable
+- **Incremental auto-vacuum** reclaims space after prune cycles
 - **No OTEL SDK, no WebSocket, no auth, no SSR**
 
 ## OpenClaw Plugin SDK Reference

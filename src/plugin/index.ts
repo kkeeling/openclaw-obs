@@ -9,6 +9,7 @@ import {
   insertMessage,
   pruneOldTraces,
   pruneBySize,
+  ensureIncrementalAutoVacuum,
   closeDb,
 } from "./db.js";
 import { EventBuffer, type BufferedEvent } from "./buffer.js";
@@ -33,6 +34,7 @@ const messageSequence = new Map<string, number>(); // traceId -> next sequence n
 const uuidToSessionKey = new Map<string, string>(); // UUID sessionId -> full sessionKey (for diagnostic event correlation)
 const recentLlmSpanTraces = new Map<string, number>(); // traceId -> timestamp of last llm_output span (dedup with diagnostic events)
 let pruneInterval: ReturnType<typeof setInterval> | null = null;
+let startupTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Max age for sessionTraceMap entries before eviction (2 hours)
 const SESSION_MAP_MAX_AGE_MS = 2 * 60 * 60 * 1000;
@@ -700,12 +702,23 @@ export const plugin = {
       async start() {
         buffer.start();
 
-        // Prune on startup
-        try {
-          pruneOldTraces();
-          pruneBySize();
-        } catch (err) {
-          console.error("[openclaw-obs] Prune on startup failed:", err);
+        // Defer all heavy DB work so the gateway event loop isn't blocked
+        // during channel initialization (e.g. Telegram).
+        startupTimer = setTimeout(() => {
+          try {
+            ensureIncrementalAutoVacuum();
+          } catch (err) {
+            console.error("[openclaw-obs] ensureIncrementalAutoVacuum failed:", err);
+          }
+          try {
+            pruneOldTraces();
+            pruneBySize();
+          } catch (err) {
+            console.error("[openclaw-obs] Prune on startup failed:", err);
+          }
+        }, 2000);
+        if (startupTimer && typeof startupTimer === "object" && "unref" in startupTimer) {
+          startupTimer.unref();
         }
 
         // Hourly prune
@@ -724,6 +737,10 @@ export const plugin = {
       },
       async stop() {
         buffer.stop();
+        if (startupTimer) {
+          clearTimeout(startupTimer);
+          startupTimer = null;
+        }
         if (pruneInterval) {
           clearInterval(pruneInterval);
           pruneInterval = null;
